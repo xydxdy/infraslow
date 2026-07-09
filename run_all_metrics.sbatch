@@ -2,7 +2,7 @@
 #SBATCH --job-name=all_metrics
 #SBATCH --partition=mignot
 #SBATCH --output=logs/all_metrics_%j.log
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -20,7 +20,7 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export SLURM_CPUS_PER_TASK=16
-export METADATA=$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv
+export METADATA=$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv
 export OUTPUT=results/all_metrics.csv
 export ERROR_OUTPUT=results/all_metrics_errors.csv
 

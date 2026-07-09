@@ -222,6 +222,10 @@ def load_bioserenity_metadata(metadata_path: Path) -> pd.DataFrame:
     out = out[METADATA_COLUMNS].copy()
 
     out["ID"] = out["ID"].astype(str).str.strip()
+    # Some source exports (e.g. Morpheus) write integer ids as floats ("8631.0");
+    # the on-disk EDF/hypnodensity files use the bare integer ("8631.edf"), so
+    # strip a spurious trailing ".0" before matching. GUID-style ids are untouched.
+    out["ID"] = out["ID"].str.replace(r"^(\d+)\.0$", r"\1", regex=True)
     out = out[out["ID"].notna() & (out["ID"] != "") & (out["ID"].str.lower() != "nan")]
     out["Age"] = pd.to_numeric(out["Age"], errors="coerce")
     out["BMI"] = pd.to_numeric(out["BMI"], errors="coerce")

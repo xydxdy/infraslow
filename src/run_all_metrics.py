@@ -86,7 +86,7 @@ logger = logging.getLogger("run_all_metrics")
 # --------------------------------------------------------------------------- #
 # Defaults / constants
 # --------------------------------------------------------------------------- #
-DEFAULT_METADATA = "$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv"
+DEFAULT_METADATA = "$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv"
 DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
 DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
 DEFAULT_OUTPUT = "results/all_metrics.csv"
