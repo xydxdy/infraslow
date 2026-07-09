@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Generated data / logs / results
+logs/
+output/
+results/
+results_tmp/
+papers/
+slides/
+
+# Slurm job output
+slurm-*.out
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Papers
+.pdf
+.pptx
+.out
