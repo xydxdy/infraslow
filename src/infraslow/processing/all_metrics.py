@@ -4,7 +4,9 @@ This module industrialises the single-subject analysis prototyped in
 ``src/demo_infraslow_yasa_average.ipynb`` so it can run over *every* subject that
 has all three required inputs on ``$OAK``:
 
-* metadata row in ``bioserenity_metadata3.csv`` (``ID, Age, Gender, BMI``),
+* metadata row (``ID, Age, Gender, BMI``) from *either* of two source CSVs --
+  ``Morpheus_Data_All5.csv`` and ``bioserenity_metadata3.csv`` -- combined by
+  :func:`combine_bioserenity_metadata` (see ``src/match_cohort.py``),
 * an EDF signal file ``$OAK/psg/Bioserenity/edf/{id}.edf``,
 * a hypnodensity CSV ``$OAK/psg/Bioserenity/Sleep_Staging/{id}_Hypnodensity.csv``.
 
@@ -132,16 +134,6 @@ _STAGE_METRIC_KEYS: List[str] = [
     "bandwidth_hz", "auc", "detected",
 ]
 
-# Aliases accepted on the metadata CSV -> the canonical output name. First match
-# wins; matching is also attempted case-insensitively.
-_METADATA_ALIASES: Dict[str, List[str]] = {
-    "ID": ["ID", "id", "subject_id", "SubjectID", "Subject_ID"],
-    "Age": ["Age", "age"],
-    "Gender": ["Gender", "gender", "Sex", "sex"],
-    "BMI": ["BMI", "bmi"],
-}
-
-
 def _stage_columns(stage: str) -> List[str]:
     """Ordered output columns for one infraslow stage group."""
     cols = [f"{stage}_{key}" for key in _STAGE_METRIC_KEYS]
@@ -161,28 +153,17 @@ def all_metric_columns() -> List[str]:
 # --------------------------------------------------------------------------- #
 # Metadata
 # --------------------------------------------------------------------------- #
-def _resolve_column(available: Sequence[str], aliases: Sequence[str]) -> Optional[str]:
-    """Return the first alias present in ``available`` (case-insensitive fallback)."""
-    lower = {c.lower(): c for c in available}
-    for alias in aliases:
-        if alias in available:
-            return alias
-        if alias.lower() in lower:
-            return lower[alias.lower()]
-    return None
-
-
 def load_bioserenity_metadata(metadata_path: Path) -> pd.DataFrame:
     """Load metadata and standardise columns to ``ID, Age, Gender, BMI``.
 
-    Only the four needed columns are read (the CSV is wide and long), each
-    resolved through :data:`_METADATA_ALIASES` so minor header differences
-    (e.g. ``sex`` vs ``Gender``) are tolerated. ``ID`` is read as a string
-    (subject ids are brace-wrapped GUIDs); ``Age`` and ``BMI`` are coerced to
-    numeric with unparseable cells becoming ``NaN``.
+    Only the four needed columns are read (the CSV is wide and long). ``ID`` is
+    read as a string (subject ids are brace-wrapped GUIDs); ``Age`` and ``BMI``
+    are coerced to numeric with unparseable cells becoming ``NaN``.
 
     Args:
-        metadata_path: Path to ``bioserenity_metadata3.csv``.
+        metadata_path: Path to a metadata CSV (e.g. ``Morpheus_Data_All5.csv``
+            or ``bioserenity_metadata3.csv``) with columns named exactly
+            ``ID, Age, Gender, BMI``.
 
     Returns:
         DataFrame with exactly the columns ``["ID", "Age", "Gender", "BMI"]``,
@@ -190,32 +171,23 @@ def load_bioserenity_metadata(metadata_path: Path) -> pd.DataFrame:
 
     Raises:
         FileNotFoundError: if ``metadata_path`` does not exist.
-        KeyError: if the ``ID`` column cannot be resolved.
+        KeyError: if the ``ID`` column is missing.
     """
     metadata_path = Path(metadata_path)
     if not metadata_path.is_file():
         raise FileNotFoundError(f"Metadata CSV does not exist: {metadata_path}")
 
-    # Read only the header first to resolve source column names cheaply.
+    # Read only the header first to check which columns are present.
     header = pd.read_csv(metadata_path, nrows=0)
     available = list(header.columns)
-
-    resolved: Dict[str, str] = {}
-    for canonical, aliases in _METADATA_ALIASES.items():
-        src = _resolve_column(available, aliases)
-        if src is not None:
-            resolved[canonical] = src
-    if "ID" not in resolved:
+    if "ID" not in available:
         raise KeyError(
-            f"Could not resolve an ID column in {metadata_path.name}; "
-            f"tried {_METADATA_ALIASES['ID']}. Columns: {available[:10]}..."
+            f"Could not find an 'ID' column in {metadata_path.name}; "
+            f"Columns: {available[:10]}..."
         )
 
-    usecols = list(resolved.values())
-    raw = pd.read_csv(metadata_path, usecols=usecols, dtype={resolved["ID"]: str})
-
-    # Rename source -> canonical and fill any unresolved optional columns with NaN.
-    out = raw.rename(columns={src: canonical for canonical, src in resolved.items()})
+    usecols = [c for c in METADATA_COLUMNS if c in available]
+    out = pd.read_csv(metadata_path, usecols=usecols, dtype={"ID": str})
     for canonical in METADATA_COLUMNS:
         if canonical not in out.columns:
             out[canonical] = np.nan
@@ -231,6 +203,28 @@ def load_bioserenity_metadata(metadata_path: Path) -> pd.DataFrame:
     out["BMI"] = pd.to_numeric(out["BMI"], errors="coerce")
     out["Gender"] = out["Gender"].astype(str).str.strip()
     return out.reset_index(drop=True)
+
+
+def combine_bioserenity_metadata(*frames: pd.DataFrame) -> pd.DataFrame:
+    """Union metadata rows from multiple sources, keyed by ``ID``.
+
+    A subject is kept if its ``ID`` appears in *any* of ``frames`` (OR, not
+    intersection). Where the same ``ID`` appears in more than one frame, the
+    first non-null value per column wins.
+
+    Args:
+        *frames: Standardised metadata frames (see :func:`load_bioserenity_metadata`).
+
+    Returns:
+        DataFrame with columns ``["ID", "Age", "Gender", "BMI"]``, one row per
+        distinct ``ID``.
+    """
+    combined = pd.concat(frames, ignore_index=True)
+    coalesce_first = lambda s: s.dropna().iloc[0] if s.notna().any() else np.nan
+    out = combined.groupby("ID", as_index=False).agg(
+        {col: coalesce_first for col in METADATA_COLUMNS if col != "ID"}
+    )
+    return out[METADATA_COLUMNS].reset_index(drop=True)
 
 
 def find_valid_bioserenity_subjects(
@@ -504,6 +498,7 @@ def calculate_stage_infraslow(
     window_sec: float = WINDOW_SEC,
     min_bout_sec: float = MIN_BOUT_SEC,
     require_spindle: bool = True,
+    spectrum_out: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, float]:
     """Infraslow sigma-power metrics for one stage group of one subject.
 
@@ -529,6 +524,12 @@ def calculate_stage_infraslow(
         stage: One of :data:`INFRASLOW_STAGES`.
         require_spindle: If ``True`` (default, matches the reference), a bout must
             contain >= 1 spindle peak to be used.
+        spectrum_out: If given, populated in place with the *empirical* spectrum
+            underlying the fit -- ``{"freqs": ..., "corr_mean": ...}``, the
+            bout-averaged baseline-corrected relative spectrum -- when one was
+            computed. Left untouched (no keys added) if no usable bout data
+            exists. Kept out of the returned metrics dict since it holds arrays,
+            not scalars, and callers that only want the CSV row can ignore it.
 
     Returns:
         Dict with keys :data:`_STAGE_METRIC_KEYS` (``peak_freq``, ``peak_freq_sem``,
@@ -602,6 +603,9 @@ def calculate_stage_infraslow(
     # Bandwidth / AUC / detection from the fit of the bout-averaged spectrum
     # (matches the reference notebook; more stable than a single-bout fit).
     corr_mean = np.mean(np.vstack(corrected_specs), axis=0)
+    if spectrum_out is not None:
+        spectrum_out["freqs"] = freqs
+        spectrum_out["corr_mean"] = corr_mean
     bandwidth = auc = float("nan")
     detected = False
     try:
@@ -633,6 +637,7 @@ def calculate_subject_infraslow_metrics(
     channel: str = CHANNEL,
     require_spindle: bool = True,
     loader: Optional[BioserenityPSGLoader] = None,
+    spectra_out: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
 ) -> Dict[str, float]:
     """Infraslow metrics for all stage groups of one subject.
 
@@ -648,6 +653,9 @@ def calculate_subject_infraslow_metrics(
         channel: Canonical EEG channel for the sigma-power envelope.
         require_spindle: Passed through to :func:`calculate_stage_infraslow`.
         loader: Optional pre-loaded loader (skips construction/loading).
+        spectra_out: If given, populated in place with ``{stage: {"freqs":
+            ..., "corr_mean": ...}}`` for every stage that had usable bout
+            data (see :func:`calculate_stage_infraslow`'s ``spectrum_out``).
 
     Returns:
         Flat dict ``{f"{stage}_{key}": value}`` for every stage/metric, plus
@@ -681,16 +689,21 @@ def calculate_subject_infraslow_metrics(
 
     out: Dict[str, float] = {}
     for stage in INFRASLOW_STAGES:
+        stage_spectrum: Dict[str, np.ndarray] = {}
         try:
             stage_metrics = calculate_stage_infraslow(
                 hypnogram, sigma_db, t_env, spindle_peaks, stage,
                 require_spindle=require_spindle,
+                spectrum_out=stage_spectrum,
             )
         except Exception as exc:  # noqa: BLE001 - one stage must not sink the subject
             logger.warning("Infraslow failed for %s stage %s: %s", subject_id, stage, exc)
             stage_metrics = _nan_stage_metrics()
+            stage_spectrum = {}
         for key, value in stage_metrics.items():
             out[f"{stage}_{key}"] = value
+        if spectra_out is not None and stage_spectrum:
+            spectra_out[stage] = stage_spectrum
     return out
 
 
@@ -705,6 +718,7 @@ def calculate_subject_all_metrics(
     sf: float = SF,
     channel: str = CHANNEL,
     require_spindle: bool = True,
+    spectra_out: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
 ) -> Dict[str, float]:
     """Metadata + YASA sleep statistics + infraslow metrics for one subject.
 
@@ -713,6 +727,10 @@ def calculate_subject_all_metrics(
         edf_path: Path to the subject's EDF (validated to exist).
         hypnodensity_path: Path to the subject's hypnodensity CSV.
         sf, channel, require_spindle: Analysis parameters (see the module constants).
+        spectra_out: If given, populated in place with this subject's empirical
+            spectra -- see :func:`calculate_subject_infraslow_metrics`. Lets a
+            caller persist the true (pre-fit) grand-average curve alongside the
+            scalar metrics without it polluting the CSV row.
 
     Returns:
         A flat dict keyed by :func:`all_metric_columns` (one row of the final table).
@@ -740,7 +758,8 @@ def calculate_subject_all_metrics(
 
     # Infraslow metrics (reads the EDF via the loader).
     infra = calculate_subject_infraslow_metrics(
-        subject_id, hypnogram, sf=sf, channel=channel, require_spindle=require_spindle
+        subject_id, hypnogram, sf=sf, channel=channel, require_spindle=require_spindle,
+        spectra_out=spectra_out,
     )
     row.update(infra)
 
@@ -845,7 +864,8 @@ __all__ = [
     "MIN_BOUT_SEC", "WINDOW_SEC", "EPOCH_SEC", "SF_ENV",
     "STAGE_GROUP_CODES", "INFRASLOW_STAGES",
     "METADATA_COLUMNS", "YASA_STAT_COLUMNS", "all_metric_columns",
-    "load_bioserenity_metadata", "find_valid_bioserenity_subjects",
+    "load_bioserenity_metadata", "combine_bioserenity_metadata",
+    "find_valid_bioserenity_subjects",
     "load_hypnodensity_as_hypnogram", "calculate_yasa_sleep_statistics",
     "find_stage_bouts", "calculate_stage_bouts",
     "calculate_stage_infraslow", "calculate_subject_infraslow_metrics",

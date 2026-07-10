@@ -4,7 +4,18 @@
 Command-line, parallel reproduction of ``src/all_metrics_calculation.ipynb``.
 For every subject that has both an EDF and a hypnodensity file on ``$OAK`` it
 computes metadata + YASA sleep statistics + N2/N3/NREM infraslow metrics, and
-writes one merged CSV (plus a CSV of per-subject failures).
+writes one merged CSV (plus a CSV of per-subject failures) -- and, alongside
+it, each subject's *empirical* (pre-fit) infraslow spectrum per stage as its
+own ``{ID}_spectra.npz`` under ``--spectra-dir``, so a true grand-average curve
+can be plotted later instead of one reconstructed from the fitted Gaussian
+parameters alone. One file per subject (not one consolidated file) because the
+cohort is 100k+ subjects -- a single growing ``.npz`` rewritten on every
+checkpoint would be O(n) work per checkpoint; a small per-subject file is a
+one-time write with no rewrite cost as the cohort grows.
+
+Metadata is read from *two* source CSVs and combined by subject ``ID`` (a
+subject is kept if it appears in *either* file; see :func:`~infraslow.processing.
+all_metrics.combine_bioserenity_metadata`), matching ``src/match_cohort.py``.
 
 The analysis itself is unchanged from the notebook: all computation is delegated
 to :mod:`infraslow.processing.all_metrics` (the same functions the notebook
@@ -60,6 +71,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 # The package lives beside this script (``src/infraslow``); make sure it is
@@ -77,6 +89,7 @@ from infraslow.processing.all_metrics import (
     SF,
     all_metric_columns,
     calculate_subject_all_metrics,
+    combine_bioserenity_metadata,
     find_valid_bioserenity_subjects,
     load_bioserenity_metadata,
 )
@@ -87,10 +100,12 @@ logger = logging.getLogger("run_all_metrics")
 # Defaults / constants
 # --------------------------------------------------------------------------- #
 DEFAULT_METADATA = "$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv"
+DEFAULT_METADATA2 = "$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv"
 DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
 DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
-DEFAULT_OUTPUT = "results/all_metrics.csv"
-DEFAULT_ERROR_OUTPUT = "results/all_metrics_errors.csv"
+DEFAULT_OUTPUT = "$SCRATCH/results/all_metrics.csv"
+DEFAULT_ERROR_OUTPUT = "$SCRATCH/results/all_metrics_errors.csv"
+DEFAULT_SPECTRA_DIR = "$SCRATCH/results/spectra"
 EDF_SUFFIX = ".edf"
 HYPNO_SUFFIX = DEFAULT_HYPNODENSITY_SUFFIX  # "_Hypnodensity.csv"
 
@@ -105,8 +120,8 @@ _PERCENT_RENAME: Dict[str, str] = {
     f"%{stage}_bouts": f"{stage}_percent_bouts" for stage in INFRASLOW_STAGES
 }
 
-# A single unit of work: (subject_id, metadata_row, edf_path, hypno_path, params).
-Task = Tuple[str, Dict[str, Any], str, str, Dict[str, Any]]
+# A single unit of work: (subject_id, metadata_row, edf_path, hypno_path, params, spectra_dir).
+Task = Tuple[str, Dict[str, Any], str, str, Dict[str, Any], str]
 # A worker outcome: (status, subject_id, payload).
 Outcome = Tuple[str, str, Dict[str, Any]]
 
@@ -126,12 +141,22 @@ def process_subject(task: Task) -> Outcome:
     ``("error", subject_id, error_record_dict)`` on any handled failure.
     (A hard crash such as an OOM kill cannot be caught here -- the driver
     handles that as a ``BrokenProcessPool`` casualty.)
+
+    On success, this subject's empirical (pre-fit) infraslow spectra are also
+    written directly to their own ``.npz`` (see :func:`write_subject_spectra`)
+    -- done here, inside the worker, so the tiny arrays never need to be shipped
+    back through the process pool just to be written by the driver.
     """
-    subject_id, metadata_row, edf_path, hypno_path, params = task
+    subject_id, metadata_row, edf_path, hypno_path, params, spectra_dir = task
     try:
+        spectra: Dict[str, Dict[str, Any]] = {}
         metrics = calculate_subject_all_metrics(
-            metadata_row, Path(edf_path), Path(hypno_path), **params
+            metadata_row, Path(edf_path), Path(hypno_path), spectra_out=spectra, **params
         )
+        try:
+            write_subject_spectra(Path(spectra_dir), subject_id, spectra)
+        except Exception as exc:  # noqa: BLE001 - a spectra-write failure must not lose the metrics
+            logger.warning("Could not write spectra for %s: %s", subject_id, exc)
         return ("ok", subject_id, metrics)
     except Exception as exc:  # noqa: BLE001 - isolate every per-subject failure
         return ("error", subject_id, _error_record(subject_id, exc))
@@ -230,6 +255,38 @@ def _atomic_to_csv(df: pd.DataFrame, path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Spectra (.npz) helper -- the empirical (pre-fit) grand-average curve
+# --------------------------------------------------------------------------- #
+def write_subject_spectra(
+    spectra_dir: Path, subject_id: str, spectra: Dict[str, Dict[str, Any]]
+) -> None:
+    """Write one subject's empirical infraslow spectra to ``{spectra_dir}/{ID}_spectra.npz``.
+
+    One file per subject, not one consolidated file: with a 100k+-subject
+    cohort, rewriting a single growing ``.npz`` on every checkpoint would be
+    O(n) work per checkpoint. Each subject's file is written exactly once and
+    never touched again, so total write cost stays O(1) per subject regardless
+    of cohort size (see :func:`process_subject`, which calls this).
+
+    Keys are ``{stage}_freqs`` / ``{stage}_corr_mean`` for whichever stages had
+    usable bout data (see :func:`~infraslow.processing.all_metrics.
+    calculate_stage_infraslow`'s ``spectrum_out``); a subject with no usable
+    stage data writes nothing.
+    """
+    if not spectra:
+        return
+    arrays: Dict[str, np.ndarray] = {}
+    for stage, entry in spectra.items():
+        arrays[f"{stage}_freqs"] = entry["freqs"]
+        arrays[f"{stage}_corr_mean"] = entry["corr_mean"]
+
+    path = spectra_dir / f"{subject_id}_spectra.npz"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    np.savez_compressed(tmp, **arrays)
+    os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------- #
 # CLI / configuration
 # --------------------------------------------------------------------------- #
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -241,7 +298,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--workers", type=int, default=None,
         help="Parallel worker processes. Defaults to $SLURM_CPUS_PER_TASK, else 1.",
     )
-    parser.add_argument("--metadata", default=DEFAULT_METADATA, help="Metadata CSV path.")
+    parser.add_argument("--metadata", default=DEFAULT_METADATA, help="Primary metadata CSV path.")
+    parser.add_argument(
+        "--metadata2", default=DEFAULT_METADATA2,
+        help="Second metadata CSV path, combined with --metadata by ID (OR, not intersection).",
+    )
     parser.add_argument("--edf-dir", default=DEFAULT_EDF_DIR, help="Directory of {id}.edf files.")
     parser.add_argument(
         "--hypno-dir", default=DEFAULT_HYPNO_DIR,
@@ -250,6 +311,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output metrics CSV.")
     parser.add_argument(
         "--error-output", default=DEFAULT_ERROR_OUTPUT, help="Failed-subjects CSV.",
+    )
+    parser.add_argument(
+        "--spectra-dir", default=DEFAULT_SPECTRA_DIR,
+        help="Directory of one {ID}_spectra.npz per subject (freqs + baseline-corrected "
+             "relative power per stage), for the true grand-average curve.",
     )
     parser.add_argument(
         "--limit", type=int, default=None,
@@ -343,26 +409,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     chunk_size = max(1, args.chunk_size)
 
     metadata_path = _expand(args.metadata)
+    metadata_path2 = _expand(args.metadata2)
     edf_dir = _expand(args.edf_dir)
     hypno_dir = _expand(args.hypno_dir)
     output_path = _expand(args.output)
     error_path = _expand(args.error_output)
+    spectra_dir = _expand(args.spectra_dir)
 
     # Requirement: create results/ and logs/ up front.
     output_path.parent.mkdir(parents=True, exist_ok=True)
     error_path.parent.mkdir(parents=True, exist_ok=True)
+    spectra_dir.mkdir(parents=True, exist_ok=True)
     Path("logs").mkdir(parents=True, exist_ok=True)
 
     logger.info("workers        : %d", workers)
     logger.info("chunk size     : %d", chunk_size)
     logger.info("metadata       : %s", metadata_path)
+    logger.info("metadata2      : %s", metadata_path2)
     logger.info("edf dir        : %s", edf_dir)
     logger.info("hypno dir      : %s", hypno_dir)
     logger.info("output         : %s", output_path)
     logger.info("error output   : %s", error_path)
+    logger.info("spectra dir    : %s", spectra_dir)
 
-    # --- 1. Metadata + valid-subject discovery ---------------------------- #
-    metadata = load_bioserenity_metadata(metadata_path)
+    # --- 1. Metadata (union of both sources by ID) + valid-subject discovery #
+    metadata = combine_bioserenity_metadata(
+        load_bioserenity_metadata(metadata_path),
+        load_bioserenity_metadata(metadata_path2),
+    )
     valid = find_valid_bioserenity_subjects(
         metadata, edf_dir, hypno_dir, hypnodensity_suffix=HYPNO_SUFFIX,
     )
@@ -395,6 +469,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("--overwrite set: existing %s will be replaced", output_path)
 
     # --- 3. Build the task list ------------------------------------------- #
+    # (Spectra need no separate resume handling: each subject's {ID}_spectra.npz
+    # is written once by the worker; a subject skipped via done_ids just leaves
+    # its prior-run file untouched on disk.)
     params = {"sf": SF, "channel": CHANNEL, "require_spindle": True}
     tasks: List[Task] = []
     for _, row in valid.iterrows():
@@ -405,7 +482,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         metadata_row["ID"] = subject_id
         edf_path = str(edf_dir / f"{subject_id}{EDF_SUFFIX}")
         hypno_path = str(hypno_dir / f"{subject_id}{HYPNO_SUFFIX}")
-        tasks.append((subject_id, metadata_row, edf_path, hypno_path, params))
+        tasks.append((subject_id, metadata_row, edf_path, hypno_path, params, str(spectra_dir)))
 
     n_to_process = len(tasks)
     logger.info("subjects to process this run: %d", n_to_process)
@@ -433,6 +510,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 processed, n_to_process, len(result_records), len(error_records),
             )
 
+    def checkpoint() -> None:
+        write_outputs(output_path, error_path, prior_df, result_records, error_records)
+
     casualties: List[Task] = []
     if n_to_process == 0:
         logger.info("nothing to process")
@@ -443,7 +523,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for task in tasks:
             handle(_run_isolated(task))
             if processed % chunk_size == 0:
-                write_outputs(output_path, error_path, prior_df, result_records, error_records)
+                checkpoint()
                 logger.info("checkpoint written at %d/%d", processed, n_to_process)
     else:
         logger.info("running with %d worker(s) in chunks of %d", workers, chunk_size)
@@ -459,7 +539,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     len(chunk_casualties),
                 )
             # Checkpoint after every chunk so a killed job resumes cleanly.
-            write_outputs(output_path, error_path, prior_df, result_records, error_records)
+            checkpoint()
             logger.info("checkpoint written at %d/%d", processed, n_to_process)
 
     # --- 4b. Retry casualties one at a time, fully isolated --------------- #
@@ -467,10 +547,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning("retrying %d casualty subject(s) in isolation...", len(casualties))
         for task in casualties:
             handle(_run_isolated(task))
-            write_outputs(output_path, error_path, prior_df, result_records, error_records)
+            checkpoint()
 
     # --- 5. Final write --------------------------------------------------- #
-    write_outputs(output_path, error_path, prior_df, result_records, error_records)
+    checkpoint()
 
     # --- 6. Summary ------------------------------------------------------- #
     n_prior = 0 if prior_df is None else len(prior_df)
@@ -482,6 +562,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Failed:                        {len(error_records)}")
     print(f"Output CSV:                    {output_path}")
     print(f"Error CSV:                     {error_path}")
+    print(f"Spectra dir ({{ID}}_spectra.npz): {spectra_dir}")
     print("=" * 60)
     return 0
 
