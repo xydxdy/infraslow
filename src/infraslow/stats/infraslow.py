@@ -21,7 +21,7 @@ statsmodels is imported lazily; the permutation test is pure NumPy.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd

@@ -1,7 +1,6 @@
 """Generic utilities for the :mod:`infraslow.io` layer (reading PSG/CSV inputs).
 
-Small, reusable, io-specific building blocks. Companion to
-:mod:`infraslow.io.helpers`.
+Small, reusable, io-specific building blocks.
 """
 
 from __future__ import annotations

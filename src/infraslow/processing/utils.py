@@ -1,7 +1,6 @@
 """Generic utilities for the :mod:`infraslow.processing` layer.
 
 Small, reusable building blocks specific to turning inputs into derived results.
-Companion to :mod:`infraslow.processing.helpers`.
 """
 
 from __future__ import annotations

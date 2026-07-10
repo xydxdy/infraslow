@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=60G
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=20G
 
 mkdir -p logs
 mkdir -p results
@@ -19,8 +19,8 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export SLURM_CPUS_PER_TASK=16
-export METADATA=$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv
+export SLURM_CPUS_PER_TASK=6
+export METADATA=$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv
 export OUTPUT=results/all_metrics.csv
 export ERROR_OUTPUT=results/all_metrics_errors.csv
 
