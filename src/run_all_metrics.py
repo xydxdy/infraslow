@@ -282,7 +282,12 @@ def write_subject_spectra(
 
     path = spectra_dir / f"{subject_id}_spectra.npz"
     tmp = path.with_suffix(path.suffix + ".tmp")
-    np.savez_compressed(tmp, **arrays)
+    # ``np.savez_compressed`` silently appends ".npz" to a *filename* that
+    # doesn't already end in ".npz" -- "{tmp}.npz" would be created instead of
+    # "{tmp}", and the rename below would then fail to find it. Passing an
+    # open file object instead of a path bypasses that auto-append entirely.
+    with open(tmp, "wb") as fh:
+        np.savez_compressed(fh, **arrays)
     os.replace(tmp, path)
 
 

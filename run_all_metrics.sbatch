@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
-#SBATCH --mem=20G
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=30G
 
 mkdir -p logs
 mkdir -p "$SCRATCH/results/spectra"
@@ -19,7 +19,7 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export SLURM_CPUS_PER_TASK=6
+export SLURM_CPUS_PER_TASK=10
 export METADATA=$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv
 export METADATA2=$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv
 export OUTPUT=$SCRATCH/results/all_metrics.csv
