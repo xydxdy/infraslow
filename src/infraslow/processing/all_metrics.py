@@ -52,8 +52,9 @@ compute node -- never on the login node).
 from __future__ import annotations
 
 import logging
+import traceback as _traceback
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -66,6 +67,7 @@ from ..io.hypnodensity import (
 from ..io.psg_loader import BioserenityPSGLoader
 from ..io.utils import list_dir_filenames, progress_iter
 from .detection import (
+    DEFAULT_EEG_CHANNELS,
     DEFAULT_EPOCH_SEC,
     DEFAULT_STAGE_MAP,
     _extract_epoch_stages,
@@ -77,6 +79,7 @@ from .infraslow import (
     DEFAULT_SF_ENV,
     infraslow_spectrum,
     sigma_power_envelope,
+    spindle_rate_series,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,13 +104,21 @@ SF_ENV: float = DEFAULT_SF_ENV           # 1 Hz sigma-power envelope rate
 # Stage groups analysed for infraslow metrics -> the YASA integer codes that
 # make up each group (0=Wake, 1=N1, 2=N2, 3=N3, 4=REM).
 STAGE_GROUP_CODES: Dict[str, Tuple[int, ...]] = {
+    "N1": (1,),
     "N2": (2,),
     "N3": (3,),
     "NREM": (1, 2, 3),
 }
-INFRASLOW_STAGES: Tuple[str, ...] = ("N2", "N3", "NREM")
-# Sleep stages spindles are detected within for the bout filter (N2+N3).
-SPINDLE_INCLUDE: Tuple[int, ...] = (2, 3)
+INFRASLOW_STAGES: Tuple[str, ...] = ("N1", "N2", "N3", "NREM")
+# Stage groups written to the per-subject, per-channel npz files (run_all_metrics.py
+# v2 pipeline; see calculate_subject_channel_events). Same three stage groups as
+# INFRASLOW_STAGES -- kept as a separate name since the v2 pipeline's per-channel
+# npz layout is a distinct concept from the legacy single-channel scalar metrics.
+NPZ_STAGES: Tuple[str, ...] = INFRASLOW_STAGES
+# Sleep stages spindles are detected within for the bout filter (N1+N2+N3).
+SPINDLE_INCLUDE: Tuple[int, ...] = (1, 2, 3)
+# EEG channels analysed per subject in the v2 (per-channel) npz pipeline.
+CHANNELS: Tuple[str, ...] = DEFAULT_EEG_CHANNELS
 
 # --------------------------------------------------------------------------- #
 # Output schema
@@ -708,6 +719,364 @@ def calculate_subject_infraslow_metrics(
 
 
 # --------------------------------------------------------------------------- #
+# v2 pipeline: per-channel, per-stage spectra + bout/spindle detail (no fit)
+# --------------------------------------------------------------------------- #
+#: Every array key written into an npz for one channel/stage (see
+#: :func:`calculate_stage_events`); npz-key suffix each maps to.
+STAGE_EVENT_FIELDS: Dict[str, str] = {
+    "freqs": "spectra__freqs",
+    "corr_mean": "spectra__corr_mean",
+    "spindle_start": "spindles__start",
+    "spindle_stop": "spindles__stop",
+    "spindle_peak": "spindles__peak",
+    "bout_start": "bouts__start",
+    "bout_stop": "bouts__stop",
+    "bout_n_spindles": "bouts__n_spindles",
+}
+#: dtype for each field above -- float64 throughout except the spindle count.
+_STAGE_EVENT_DTYPES: Dict[str, Any] = {
+    "freqs": np.float64, "corr_mean": np.float64,
+    "spindle_start": np.float64, "spindle_stop": np.float64, "spindle_peak": np.float64,
+    "bout_start": np.float64, "bout_stop": np.float64, "bout_n_spindles": np.int64,
+}
+
+
+def empty_stage_events() -> Dict[str, np.ndarray]:
+    """All-empty, correctly-typed arrays for one channel/stage (see :data:`STAGE_EVENT_FIELDS`)."""
+    return {key: np.empty(0, dtype=dtype) for key, dtype in _STAGE_EVENT_DTYPES.items()}
+
+
+def _issue(
+    *, channel: str = "", stage: str = "", error_type: str = "", error_message: str = "",
+    include_traceback: bool = False,
+) -> Dict[str, str]:
+    """One structured, sub-subject-level failure record (channel/stage granularity)."""
+    return {
+        "channel": channel,
+        "stage": stage,
+        "error_type": error_type,
+        "error_message": error_message,
+        "traceback": _traceback.format_exc() if include_traceback else "",
+    }
+
+
+def calculate_stage_events(
+    hypnogram: np.ndarray,
+    spindle_starts: np.ndarray,
+    spindle_stops: np.ndarray,
+    spindle_peaks: np.ndarray,
+    stage: str,
+    *,
+    sf_env: float = SF_ENV,
+    epoch_sec: float = EPOCH_SEC,
+    infraslow_band: Tuple[float, float] = INFRASLOW_BAND,
+    baseline_band: Tuple[float, float] = BASELINE_BAND,
+    window_sec: float = WINDOW_SEC,
+    min_bout_sec: float = MIN_BOUT_SEC,
+    smooth_sec: float = 10.0,
+    require_spindle: bool = True,
+) -> Dict[str, np.ndarray]:
+    """Bout-averaged spindle-event infraslow spectrum + bout/spindle detail for one stage.
+
+    Implements steps 7-10 of the v2 pipeline for one channel's already-detected
+    spindles and one stage group:
+
+    1. Find consecutive ``stage`` bouts (:func:`find_stage_bouts`) of at least
+       ``min_bout_sec`` -- N2/N3 bouts split on any stage change; a combined NREM
+       bout is not split by N1<->N2<->N3 transitions (only by Wake/REM/gaps),
+       since :data:`STAGE_GROUP_CODES` treats NREM as one merged code set.
+    2. Assign each already-detected spindle to a bout by its **peak** time
+       (``bout_start <= peak < bout_stop``); a spindle assigned to no bout is
+       dropped, and (bouts being disjoint) no spindle is assigned twice.
+    3. Keep only bouts with >= 1 assigned spindle (when ``require_spindle``).
+    4. Per kept bout, build the *spindle-event time series* from its assigned
+       spindles' peak times (:func:`~infraslow.processing.infraslow.
+       spindle_rate_series`, peak times shifted to be bout-relative) and take its
+       infraslow spectrum (:func:`~infraslow.processing.infraslow.infraslow_spectrum`)
+       -- the detector-derived view, not the continuous-EEG sigma envelope.
+    5. Normalise to unit band-area and baseline-correct (subtract the
+       ``baseline_band`` mean), matching the reference notebook's spectrum
+       post-processing; average the corrected spectra across bouts.
+
+    Args:
+        hypnogram: Per-epoch YASA integer stage codes.
+        spindle_starts, spindle_stops, spindle_peaks: This channel's *entire*
+            detected-spindle set (all stages -- see :func:`calculate_subject_channel_events`,
+            which detects once per channel, not once per stage). Arrays, not a
+            DataFrame, so this function has no pandas dependency.
+        stage: One of :data:`NPZ_STAGES` (any key of :data:`STAGE_GROUP_CODES`).
+        smooth_sec: Gaussian smoothing width (s) for the spindle-rate series
+            (passed to ``spindle_rate_series``).
+        require_spindle: If ``True`` (default; the pipeline's hard requirement),
+            a bout must contain >= 1 assigned spindle to be kept.
+
+    Returns:
+        Dict with :data:`STAGE_EVENT_FIELDS` keys: ``freqs``, ``corr_mean``
+        (bout-averaged baseline-corrected relative spectrum), ``bout_start``,
+        ``bout_stop``, ``bout_n_spindles`` (one entry per qualifying bout), and
+        ``spindle_start``, ``spindle_stop``, ``spindle_peak`` (every spindle
+        assigned to a qualifying bout). All empty (never NaN-filled -- absence is
+        meaningful) when no bout qualifies.
+    """
+    if stage not in STAGE_GROUP_CODES:
+        raise KeyError(f"Unknown stage group {stage!r}; expected one of {tuple(STAGE_GROUP_CODES)}.")
+
+    bouts = find_stage_bouts(
+        hypnogram, STAGE_GROUP_CODES[stage], epoch_sec=epoch_sec, min_dur=min_bout_sec
+    )
+    peaks = np.asarray(spindle_peaks, dtype=float).ravel()
+    starts = np.asarray(spindle_starts, dtype=float).ravel()
+    stops = np.asarray(spindle_stops, dtype=float).ravel()
+
+    def _assigned(a: float, b: float) -> np.ndarray:
+        """Boolean mask of spindles whose peak falls in [a, b) -- this bout's own."""
+        return (peaks >= a) & (peaks < b) if peaks.size else np.zeros(0, dtype=bool)
+
+    if require_spindle:
+        bouts = [(a, b) for a, b in bouts if _assigned(a, b).any()]
+    if not bouts:
+        return empty_stage_events()
+
+    bout_start: List[float] = []
+    bout_stop: List[float] = []
+    bout_n_spindles: List[int] = []
+    spindle_start_chunks: List[np.ndarray] = []
+    spindle_stop_chunks: List[np.ndarray] = []
+    spindle_peak_chunks: List[np.ndarray] = []
+    corrected_specs: List[np.ndarray] = []
+    freqs: Optional[np.ndarray] = None
+    band_m = base_m = None
+
+    for a, b in bouts:
+        mask = _assigned(a, b)
+        n = int(mask.sum())
+        bout_start.append(a)
+        bout_stop.append(b)
+        bout_n_spindles.append(n)
+        if not n:
+            continue
+        spindle_start_chunks.append(starts[mask])
+        spindle_stop_chunks.append(stops[mask])
+        spindle_peak_chunks.append(peaks[mask])
+
+        rel_peaks = peaks[mask] - a  # bout-relative time, matching spindle_rate_series's [0, duration)
+        duration = b - a
+        try:
+            _, rate = spindle_rate_series(
+                rel_peaks, duration_sec=duration, sf_env=sf_env, smooth_sec=smooth_sec
+            )
+            spec = infraslow_spectrum(rate, sf_env, band=infraslow_band, window_sec=window_sec)
+        except Exception:  # noqa: BLE001 - one bout's spectrum failing must not drop the others
+            continue
+        if freqs is None:
+            freqs = spec.freqs
+            band_m = (freqs >= infraslow_band[0]) & (freqs <= infraslow_band[1])
+            base_m = (freqs >= baseline_band[0]) & (freqs <= baseline_band[1])
+        denom = float(_trapz(spec.psd[band_m], freqs[band_m]))
+        if not np.isfinite(denom) or denom <= 0:
+            continue
+        rel = spec.psd / denom
+        corrected = rel - float(rel[base_m].mean())
+        if np.all(np.isfinite(corrected)):
+            corrected_specs.append(corrected)
+
+    out_freqs = freqs if (corrected_specs and freqs is not None) else np.empty(0)
+    corr_mean = np.mean(np.vstack(corrected_specs), axis=0) if corrected_specs else np.empty(0)
+    spindle_start = np.concatenate(spindle_start_chunks) if spindle_start_chunks else np.empty(0)
+    spindle_stop = np.concatenate(spindle_stop_chunks) if spindle_stop_chunks else np.empty(0)
+    spindle_peak = np.concatenate(spindle_peak_chunks) if spindle_peak_chunks else np.empty(0)
+    return {
+        "freqs": np.asarray(out_freqs, dtype=np.float64),
+        "corr_mean": np.asarray(corr_mean, dtype=np.float64),
+        "bout_start": np.asarray(bout_start, dtype=np.float64),
+        "bout_stop": np.asarray(bout_stop, dtype=np.float64),
+        "bout_n_spindles": np.asarray(bout_n_spindles, dtype=np.int64),
+        "spindle_start": np.asarray(spindle_start, dtype=np.float64),
+        "spindle_stop": np.asarray(spindle_stop, dtype=np.float64),
+        "spindle_peak": np.asarray(spindle_peak, dtype=np.float64),
+    }
+
+
+def calculate_subject_channel_events(
+    subject_id: str,
+    hypnogram: np.ndarray,
+    *,
+    sf: float = SF,
+    channels: Sequence[str] = CHANNELS,
+    stages: Sequence[str] = NPZ_STAGES,
+    require_spindle: bool = True,
+    loader: Optional[BioserenityPSGLoader] = None,
+    issues_out: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
+    """Per-channel, per-stage infraslow spectra + bout/spindle detail for one subject.
+
+    Per channel: detect spindles **once**, restricted to all NREM epochs
+    (``include=STAGE_GROUP_CODES["NREM"]`` = N1+N2+N3, matching the YASA
+    ``03_spindles_detection_NREM_only`` convention) -- not once per stage. Then,
+    for every stage in ``stages``, :func:`calculate_stage_events` finds that
+    stage's own bouts and assigns spindles to them purely by peak-time interval
+    membership (not by which stage YASA itself scored the spindle epoch as), so
+    the same detected-spindle set feeds the N2, N3, and NREM analyses.
+
+    Builds (or reuses) a :class:`~infraslow.io.psg_loader.BioserenityPSGLoader`
+    for every channel in ``channels``. If a channel cannot be resolved (missing
+    from the EDF) or its spindle detection fails, that failure is recorded to
+    ``issues_out`` (if given) and logged, but every stage for that channel still
+    gets an entry (all-empty arrays) -- one bad channel never sinks the other
+    channels or the subject, and every channel key stays present for a
+    predictable npz schema (see :func:`~infraslow.processing.all_metrics.
+    calculate_stage_events`'s empty-array convention).
+
+    Args:
+        subject_id: EDF stem / subject id (used to locate the recording on ``$OAK``).
+        hypnogram: Per-epoch YASA integer stage codes (for bout finding).
+        sf: Common resample rate (Hz).
+        channels: Canonical EEG channels to analyse (default :data:`CHANNELS`).
+        stages: Stage groups to analyse per channel (default :data:`NPZ_STAGES`).
+        require_spindle: If ``True`` (default; the pipeline's hard requirement),
+            a bout must contain >= 1 assigned spindle to be kept.
+        loader: Optional pre-loaded loader (skips construction/loading).
+        issues_out: If given, appended in place with one dict per channel- or
+            stage-level failure (see :func:`_issue`) -- subject-id-free, since
+            the caller already knows the subject; channel/stage-level only.
+
+    Returns:
+        ``{channel: {stage: {...}}}`` -- every requested channel and stage is
+        always present (see :data:`STAGE_EVENT_FIELDS`), so the caller can write
+        a schema-stable npz per stage.
+
+    Raises:
+        Any loader error (missing/unreadable EDF) propagates, so the caller can
+        record it as a subject-level failure.
+    """
+    if loader is None:
+        loader = BioserenityPSGLoader(
+            subject_id=subject_id, sf=sf, requested_channels=list(channels)
+        ).load()
+
+    nrem_codes = STAGE_GROUP_CODES["NREM"]  # (1, 2, 3): spindle detection scope, all channels
+
+    out: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+    for ch in channels:
+        starts = stops = peaks = np.empty(0, dtype=float)
+        if require_spindle:
+            try:
+                result = spindles_detect(loader, ch_names=ch, include=nrem_codes)
+                if result is not None:
+                    summary = result.summary()
+                    starts = summary["Start"].to_numpy(dtype=float)
+                    stops = summary["End"].to_numpy(dtype=float)
+                    peaks = summary["Peak"].to_numpy(dtype=float)
+            except Exception as exc:  # noqa: BLE001 - a missing/failed channel must not sink the subject
+                logger.warning("Channel %s spindle detection failed for %s: %s", ch, subject_id, exc)
+                if issues_out is not None:
+                    issues_out.append(
+                        _issue(channel=ch, error_type=type(exc).__name__, error_message=str(exc),
+                               include_traceback=True)
+                    )
+
+        out[ch] = {}
+        for stage in stages:
+            try:
+                out[ch][stage] = calculate_stage_events(
+                    hypnogram, starts, stops, peaks, stage, require_spindle=require_spindle,
+                )
+            except Exception as exc:  # noqa: BLE001 - one stage must not sink the channel/subject
+                logger.warning(
+                    "Events failed for %s channel=%s stage=%s: %s", subject_id, ch, stage, exc
+                )
+                if issues_out is not None:
+                    issues_out.append(
+                        _issue(channel=ch, stage=stage, error_type=type(exc).__name__,
+                               error_message=str(exc), include_traceback=True)
+                    )
+                out[ch][stage] = empty_stage_events()
+    return out
+
+
+#: Output column order for the v2 (metadata + YASA stats only) CSV -- infraslow
+#: detail now lives entirely in the per-channel/per-stage npz files (see
+#: calculate_subject_channel_events), not in this row.
+def metadata_row_columns() -> List[str]:
+    """Column order for the v2 metadata CSV: metadata + full YASA sleep stats."""
+    return list(METADATA_COLUMNS) + list(YASA_STAT_COLUMNS)
+
+
+def calculate_subject_metadata_row(
+    subject_row: Mapping[str, Any], hypnogram: np.ndarray
+) -> Dict[str, float]:
+    """Metadata + YASA sleep statistics for one subject (v2 row; no infraslow scalars).
+
+    Args:
+        subject_row: A standardised metadata row (``ID, Age, Gender, BMI``).
+        hypnogram: Per-epoch YASA integer stage codes (see
+            :func:`load_hypnodensity_as_hypnogram`).
+
+    Returns:
+        Flat dict keyed by :func:`metadata_row_columns`.
+    """
+    subject_id = str(subject_row["ID"]).strip()
+    row: Dict[str, float] = {col: subject_row.get(col, np.nan) for col in METADATA_COLUMNS}
+    row["ID"] = subject_id
+    row.update(calculate_yasa_sleep_statistics(hypnogram, epoch_length_sec=int(EPOCH_SEC)))
+    return row
+
+
+def calculate_subject_v2(
+    subject_row: Mapping[str, Any],
+    edf_path: Path,
+    hypnodensity_path: Path,
+    *,
+    sf: float = SF,
+    channels: Sequence[str] = CHANNELS,
+    stages: Sequence[str] = NPZ_STAGES,
+    require_spindle: bool = True,
+    issues_out: Optional[List[Dict[str, str]]] = None,
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
+    """Metadata/YASA row + per-channel/per-stage infraslow events for one subject.
+
+    The v2 counterpart of :func:`calculate_subject_all_metrics`: the row carries
+    only metadata + YASA sleep statistics (:func:`metadata_row_columns`); all
+    infraslow spectra/bout/spindle detail -- now per :data:`CHANNELS` channel and
+    per :data:`NPZ_STAGES` stage -- is returned separately for the caller to
+    persist as npz (not flattened into the row), matching the columns actually
+    requested for the metadata CSV.
+
+    Args:
+        subject_row: A standardised metadata row (``ID, Age, Gender, BMI``).
+        edf_path: Path to the subject's EDF (validated to exist).
+        hypnodensity_path: Path to the subject's hypnodensity CSV.
+        sf, channels, stages, require_spindle: Analysis parameters.
+        issues_out: Passed through to :func:`calculate_subject_channel_events`
+            -- appended with any channel/stage-level failures.
+
+    Returns:
+        ``(row, channel_events)`` -- see :func:`calculate_subject_metadata_row`
+        and :func:`calculate_subject_channel_events`.
+
+    Raises:
+        FileNotFoundError: if the EDF or hypnodensity file is missing.
+        Any load/compute error from the EDF or YASA propagates to the caller so it
+        can be recorded as a subject-level failure.
+    """
+    edf_path = Path(edf_path)
+    hypnodensity_path = Path(hypnodensity_path)
+    if not edf_path.is_file():
+        raise FileNotFoundError(f"EDF file not found: {edf_path}")
+    if not hypnodensity_path.is_file():
+        raise FileNotFoundError(f"Hypnodensity file not found: {hypnodensity_path}")
+
+    subject_id = str(subject_row["ID"]).strip()
+    hypnogram = load_hypnodensity_as_hypnogram(hypnodensity_path)
+    row = calculate_subject_metadata_row(subject_row, hypnogram)
+    events = calculate_subject_channel_events(
+        subject_id, hypnogram, sf=sf, channels=channels, stages=stages,
+        require_spindle=require_spindle, issues_out=issues_out,
+    )
+    return row, events
+
+
+# --------------------------------------------------------------------------- #
 # Full per-subject assembly + cohort runner
 # --------------------------------------------------------------------------- #
 def calculate_subject_all_metrics(
@@ -860,9 +1229,9 @@ def run_all_subjects(
 
 
 __all__ = [
-    "SF", "CHANNEL", "SIGMA_BAND", "INFRASLOW_BAND", "BASELINE_BAND",
+    "SF", "CHANNEL", "CHANNELS", "SIGMA_BAND", "INFRASLOW_BAND", "BASELINE_BAND",
     "MIN_BOUT_SEC", "WINDOW_SEC", "EPOCH_SEC", "SF_ENV",
-    "STAGE_GROUP_CODES", "INFRASLOW_STAGES",
+    "STAGE_GROUP_CODES", "INFRASLOW_STAGES", "NPZ_STAGES", "SPINDLE_INCLUDE",
     "METADATA_COLUMNS", "YASA_STAT_COLUMNS", "all_metric_columns",
     "load_bioserenity_metadata", "combine_bioserenity_metadata",
     "find_valid_bioserenity_subjects",
@@ -870,4 +1239,7 @@ __all__ = [
     "find_stage_bouts", "calculate_stage_bouts",
     "calculate_stage_infraslow", "calculate_subject_infraslow_metrics",
     "calculate_subject_all_metrics", "run_all_subjects",
+    "calculate_stage_events", "calculate_subject_channel_events", "STAGE_EVENT_FIELDS",
+    "empty_stage_events",
+    "metadata_row_columns", "calculate_subject_metadata_row", "calculate_subject_v2",
 ]
