@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
 
 
 def spindle_event_times(
@@ -47,21 +46,4 @@ def spindle_event_times(
     return np.asarray(summary, dtype=float).ravel()
 
 
-def normalize_waveform(w: "pd.Series", method: str) -> "pd.Series":
-    """Normalize one per-subject mean waveform before it is averaged.
-
-    ``"zscore"`` centres and scales to unit standard deviation over the window;
-    ``"peak"`` divides by the maximum absolute amplitude (peak magnitude -> 1).
-    A degenerate (constant) waveform is returned centred but unscaled rather than
-    producing NaNs/inf.
-    """
-    if method == "zscore":
-        std = w.std()
-        return (w - w.mean()) / std if std else w - w.mean()
-    if method == "peak":
-        peak = w.abs().max()
-        return w / peak if peak else w
-    raise ValueError("normalize must be False, True, 'zscore', or 'peak'.")
-
-
-__all__ = ["normalize_waveform", "spindle_event_times"]
+__all__ = ["spindle_event_times"]

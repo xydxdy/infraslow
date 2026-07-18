@@ -33,12 +33,12 @@
 # finishes, e.g.:
 #   python -c "import pandas as pd, glob; \
 #     pd.concat([pd.read_csv(f, dtype={'ID': str}) for f in \
-#     glob.glob('\$SCRATCH/results_v3/metadata_shard*.csv')]).to_csv( \
-#     '\$SCRATCH/results_v3/metadata.csv', index=False)"
+#     glob.glob('\$SCRATCH/results_v2/metadata_shard*.csv')]).to_csv( \
+#     '\$SCRATCH/results_v2/metadata.csv', index=False)"
 
 set -euo pipefail
 
-OUTPUT_ROOT="$SCRATCH/results_v3"
+OUTPUT_ROOT="$SCRATCH/results_v2"
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-1}}"
 SHARD_INDEX="${SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-0}}"
 

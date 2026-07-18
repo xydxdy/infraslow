@@ -3,27 +3,11 @@
 Sleep-spindle (sigma, ~12-15 Hz) power is not steady across NREM: it waxes and
 wanes with an **infraslow rhythm** around 0.02 Hz (a ~50 s period), and spindles
 cluster on the rising phase / peaks of that rhythm (Lecci et al., 2017;
-Watson, 2018). This module quantifies that rhythm two complementary ways:
+Watson, 2018). This module quantifies that rhythm from the continuous EEG --
+band-pass to sigma, take the Hilbert power envelope, down-sample it, and read
+off its low-frequency spectrum (:func:`power_envelope` -> :func:`infraslow_spectrum`).
 
-* **From the continuous EEG** -- band-pass to sigma, take the Hilbert power
-  envelope, down-sample it, and read off its low-frequency spectrum
-  (:func:`sigma_power_envelope` -> :func:`infraslow_spectrum`, wrapped by
-  :func:`sigma_infraslow_oscillation`). Detector-independent; the reference.
-
-* **From a spindle detector's events** -- turn the detected spindle times into a
-  smooth spindle-rate time series and read off *its* infraslow spectrum
-  (:func:`spindle_rate_series` -> :func:`infraslow_spectrum`, wrapped by
-  :func:`spindle_infraslow_oscillation`). This is what lets YASA and Luna be
-  compared: do the two detectors recover the same infraslow rhythm of spindle
-  occurrence?
-
-:func:`average_spindle_spectrum` gives the companion *high*-frequency view -- the
-mean power spectrum of the detected spindle epochs, showing where in the sigma
-band each detector's events concentrate.
-
-Everything here is pure NumPy/SciPy (no matplotlib, no YASA): plotting lives in
-:mod:`infraslow.viz.infraslow` and statistical comparison in
-:mod:`infraslow.stats.infraslow`.
+Everything here is pure NumPy/SciPy (no matplotlib, no YASA).
 """
 
 from __future__ import annotations
@@ -41,17 +25,16 @@ from .signal import ButterFilter
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 # Sigma (spindle) band the ISO sigma-power series is integrated over (Hz).
-# Matches the reference ``get_iso`` (Liu et al.), which uses 11-15 Hz for the
+# Matches the reference ``get_iso`` (Liu et al.), which uses 11-16 Hz for the
 # multitaper sigma-power estimate -- deliberately wider than the detector's
 # ``detection.spindles_detect`` ``freq_sp`` (12-15 Hz), as this is a power
 # integration, not a detection band.
-DEFAULT_SIGMA_BAND: Tuple[float, float] = (11.0, 15.0)
+DEFAULT_SIGMA_BAND: Tuple[float, float] = (11.0, 16.0)
 # Infraslow band the sigma-power oscillation is expected to peak in (Hz).
 # Widened to 0.01-0.1 Hz (~10-100 s) around the canonical ~0.02 Hz (50 s)
 # sigma-power rhythm, so peak-finding and band power stay anchored to it while
 # capturing slower and faster infraslow components.
 DEFAULT_INFRASLOW_BAND: Tuple[float, float] = (0.01, 0.1)
-# Rate the slow envelope / spindle-rate series is sampled at for spectral analysis
 # (Hz). 1 Hz is far above the infraslow Nyquist and keeps the series compact.
 DEFAULT_SF_ENV: float = 1.0
 # Welch segment length (seconds) for the infraslow spectrum -- long enough to
@@ -67,7 +50,7 @@ class InfraslowSpectrum:
     Attributes:
         freqs, psd: The full one-sided spectrum (``psd`` in units^2/Hz).
         sf_env: Sampling rate of the analysed series (Hz).
-        band: The infraslow band ``(lo, hi)`` the metrics summarise.
+        infraslow_band: The infraslow band ``(lo, hi)`` the metrics summarise.
         peak_freq, peak_power: Frequency (Hz) and PSD of the largest peak *within*
             ``band`` (``nan`` if the spectrum has no bin in band).
         full_peak_freq, full_peak_power: Frequency (Hz) and PSD of the largest
@@ -83,7 +66,7 @@ class InfraslowSpectrum:
     freqs: np.ndarray
     psd: np.ndarray
     sf_env: float
-    band: Tuple[float, float]
+    infraslow_band: Tuple[float, float]
     peak_freq: float
     peak_power: float
     full_peak_freq: float
@@ -113,11 +96,11 @@ def _to_db(power: np.ndarray) -> np.ndarray:
     return 10.0 * np.log10(np.where(power > 0, power, floor))
 
 
-def sigma_power_envelope(
+def power_envelope(
     data,
     sf: float,
     *,
-    sigma_band: Tuple[float, float] = DEFAULT_SIGMA_BAND,
+    band: Tuple[float, float] = DEFAULT_SIGMA_BAND,
     sf_env: float = DEFAULT_SF_ENV,
     smooth_sec: Optional[float] = None,
     order: int = 4,
@@ -125,7 +108,7 @@ def sigma_power_envelope(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Sigma-band power envelope of one channel, down-sampled to ``sf_env``.
 
-    Band-passes ``data`` to ``sigma_band`` (zero-phase Butterworth), squares the
+    Band-passes ``data`` to ``band`` (zero-phase Butterworth), squares the
     Hilbert analytic amplitude to get instantaneous sigma power, optionally
     smooths it, averages it into consecutive ``1/sf_env``-second bins, and (by
     default) converts to dB -- so the result matches the reference ``get_iso``,
@@ -136,7 +119,7 @@ def sigma_power_envelope(
     Args:
         data: 1-D EEG signal for one channel.
         sf: Sampling rate of ``data`` (Hz).
-        sigma_band: Band-pass edges (Hz) for the sigma band.
+        band: Band-pass edges (Hz) for the sigma band.
         sf_env: Output rate (Hz) of the down-sampled envelope.
         smooth_sec: If given, moving-average the full-rate power over this many
             seconds before down-sampling (extra high-frequency smoothing).
@@ -152,7 +135,7 @@ def sigma_power_envelope(
     if sf <= 0 or sf_env <= 0:
         raise ValueError(f"sf and sf_env must be positive; got {sf}, {sf_env}.")
 
-    filt = ButterFilter(sf, list(sigma_band), mode="band", order=order)(x)
+    filt = ButterFilter(sf, list(band), mode="band", order=order)(x)
     power = np.abs(signal.hilbert(filt)) ** 2
 
     if smooth_sec:
@@ -183,62 +166,20 @@ def _bin_average(x: np.ndarray, sf: float, sf_env: float) -> Tuple[np.ndarray, n
     return t, means
 
 
-def spindle_rate_series(
-    peaks_sec,
-    *,
-    duration_sec: float,
-    sf_env: float = DEFAULT_SF_ENV,
-    smooth_sec: float = 10.0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Continuous spindle-rate time series from detected spindle times.
-
-    Bins the spindle event times into ``1/sf_env``-second bins over
-    ``[0, duration_sec)`` and Gaussian-smooths the per-bin counts into a smooth
-    "instantaneous spindle rate" (spindles/s) -- the signal whose slow spectrum
-    reveals the infraslow clustering of spindles.
-
-    Args:
-        peaks_sec: Spindle event times (seconds from recording start), e.g.
-            ``spindles.summary()["Peak"]``.
-        duration_sec: Length of the recording (s); sets the time base so two
-            detectors' series are directly comparable.
-        sf_env: Output rate (Hz) of the rate series.
-        smooth_sec: Gaussian smoothing width (s). ``0`` disables smoothing.
-
-    Returns:
-        ``(t, rate)`` -- bin-centre times (s) and spindle rate (spindles/s), at
-        ``sf_env``.
-    """
-    peaks = _to_1d(peaks_sec, name="peaks_sec") if np.size(peaks_sec) else np.empty(0)
-    if duration_sec <= 0:
-        raise ValueError(f"duration_sec must be positive; got {duration_sec}.")
-    n_bins = max(1, int(round(duration_sec * sf_env)))
-    counts, _ = np.histogram(peaks, bins=n_bins, range=(0.0, duration_sec))
-    rate = counts.astype(float) * sf_env  # per-bin count -> spindles per second
-
-    if smooth_sec:
-        from scipy.ndimage import gaussian_filter1d  # noqa: PLC0415 - lazy
-
-        rate = gaussian_filter1d(rate, sigma=max(1e-6, smooth_sec * sf_env), mode="nearest")
-
-    t = (np.arange(n_bins) + 0.5) / sf_env
-    return t, rate
-
-
 def infraslow_spectrum(
     x,
     sf_env: float,
     *,
-    band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
+    infraslow_band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
     window_sec: float = DEFAULT_WINDOW_SEC,
     detrend: str = "linear",
 ) -> InfraslowSpectrum:
     """Welch power spectrum of a slow series, summarised over the infraslow band.
 
     Args:
-        x: Slow time series (e.g. a sigma-power envelope or a spindle-rate series).
+        x: Slow time series (e.g. a sigma-power envelope.
         sf_env: Sampling rate of ``x`` (Hz).
-        band: Infraslow band ``(lo, hi)`` (Hz) to summarise (peak + band power).
+        infraslow_band: Infraslow band ``(lo, hi)`` (Hz) to summarise (peak + band power).
         window_sec: Welch segment length (s). Clipped to the series length; a
             longer window sharpens low-frequency resolution.
         detrend: Passed to :func:`scipy.signal.welch`. Default ``"linear"`` matches
@@ -263,7 +204,7 @@ def infraslow_spectrum(
     )
 
     total_power = float(_trapz(psd, freqs))
-    in_band = (freqs >= band[0]) & (freqs <= band[1])
+    in_band = (freqs >= infraslow_band[0]) & (freqs <= infraslow_band[1])
     if in_band.any():
         band_power = float(_trapz(psd[in_band], freqs[in_band]))
         loc = np.argmax(psd[in_band])
@@ -274,7 +215,7 @@ def infraslow_spectrum(
     rel = band_power / total_power if total_power else float("nan")
 
     # Reference ``get_iso`` peak: argmax over the whole spectrum (excluding DC),
-    # not just within ``band`` -- its landing in-band is the sanity check.
+    # not just within ``infraslow_band`` -- its landing in-band is the sanity check.
     nz = freqs > 0
     if nz.any():
         floc = int(np.argmax(psd[nz]))
@@ -287,7 +228,7 @@ def infraslow_spectrum(
         freqs=freqs,
         psd=psd,
         sf_env=float(sf_env),
-        band=band,
+        infraslow_band=infraslow_band,
         peak_freq=peak_freq,
         peak_power=peak_power,
         full_peak_freq=full_peak_freq,
@@ -298,129 +239,12 @@ def infraslow_spectrum(
     )
 
 
-def sigma_infraslow_oscillation(
-    data,
-    sf: float,
-    *,
-    sigma_band: Tuple[float, float] = DEFAULT_SIGMA_BAND,
-    sf_env: float = DEFAULT_SF_ENV,
-    smooth_sec: Optional[float] = None,
-    band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
-    window_sec: float = DEFAULT_WINDOW_SEC,
-    order: int = 4,
-    to_db: bool = True,
-) -> Tuple[InfraslowSpectrum, np.ndarray, np.ndarray]:
-    """Continuous-EEG infraslow oscillation of sigma power (envelope + spectrum).
-
-    Convenience wrapper: :func:`sigma_power_envelope` followed by
-    :func:`infraslow_spectrum`. By default the sigma-power envelope is taken in
-    dB (``to_db=True``), matching the reference ``get_iso``.
-
-    Returns:
-        ``(spectrum, t, power)`` -- the :class:`InfraslowSpectrum` plus the
-        down-sampled sigma-power envelope it was computed from (dB if ``to_db``).
-    """
-    t, power = sigma_power_envelope(
-        data, sf, sigma_band=sigma_band, sf_env=sf_env, smooth_sec=smooth_sec,
-        order=order, to_db=to_db,
-    )
-    spec = infraslow_spectrum(power, sf_env, band=band, window_sec=window_sec)
-    return spec, t, power
-
-
-def spindle_infraslow_oscillation(
-    peaks_sec,
-    *,
-    duration_sec: float,
-    sf_env: float = DEFAULT_SF_ENV,
-    smooth_sec: float = 10.0,
-    band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
-    window_sec: float = DEFAULT_WINDOW_SEC,
-) -> Tuple[InfraslowSpectrum, np.ndarray, np.ndarray]:
-    """Detector-derived infraslow oscillation of spindle occurrence.
-
-    Convenience wrapper: :func:`spindle_rate_series` followed by
-    :func:`infraslow_spectrum`.
-
-    Returns:
-        ``(spectrum, t, rate)`` -- the :class:`InfraslowSpectrum` plus the
-        spindle-rate series it was computed from.
-    """
-    t, rate = spindle_rate_series(
-        peaks_sec, duration_sec=duration_sec, sf_env=sf_env, smooth_sec=smooth_sec
-    )
-    spec = infraslow_spectrum(rate, sf_env, band=band, window_sec=window_sec)
-    return spec, t, rate
-
-
-def average_spindle_spectrum(
-    data,
-    sf: float,
-    peaks_sec,
-    *,
-    halfwidth_sec: float = 1.0,
-    fmax: float = 20.0,
-) -> Tuple[np.ndarray, np.ndarray, int]:
-    """Mean power spectrum of the detected spindle epochs (the sigma-band view).
-
-    Extracts a ``±halfwidth_sec`` window of the raw signal around each spindle
-    peak, computes a Hann-tapered periodogram per window, and averages them --
-    showing where in the sigma band a detector's spindles concentrate. Windows
-    that run off a recording edge are skipped.
-
-    Args:
-        data: 1-D EEG signal for one channel.
-        sf: Sampling rate of ``data`` (Hz).
-        peaks_sec: Spindle peak times (seconds), e.g. ``summary()["Peak"]``.
-        halfwidth_sec: Half-window (s) around each peak.
-        fmax: Upper frequency (Hz) to return.
-
-    Returns:
-        ``(f, psd, n_used)`` -- frequencies (<= ``fmax``), the mean periodogram,
-        and how many spindle epochs contributed.
-
-    Raises:
-        ValueError: if no spindle window fits inside the recording.
-    """
-    x = _to_1d(data, name="data")
-    peaks = _to_1d(peaks_sec, name="peaks_sec") if np.size(peaks_sec) else np.empty(0)
-    h = int(round(halfwidth_sec * sf))
-    if h < 1:
-        raise ValueError("halfwidth_sec too small for this sampling rate.")
-    win = signal.windows.hann(2 * h)
-    scale = 1.0 / (sf * (win**2).sum())  # PSD normalisation
-
-    acc = None
-    n_used = 0
-    for p in peaks:
-        i = int(round(float(p) * sf))
-        lo, hi = i - h, i + h
-        if lo < 0 or hi > len(x):
-            continue
-        seg = x[lo:hi]
-        seg = (seg - seg.mean()) * win
-        p_seg = (np.abs(np.fft.rfft(seg)) ** 2) * scale
-        acc = p_seg if acc is None else acc + p_seg
-        n_used += 1
-    if n_used == 0:
-        raise ValueError("No spindle window fit inside the recording; check peaks/sf.")
-
-    f = np.fft.rfftfreq(2 * h, d=1.0 / sf)
-    psd = acc / n_used
-    keep = f <= fmax
-    return f[keep], psd[keep], n_used
-
-
 __all__ = [
     "InfraslowSpectrum",
     "DEFAULT_SIGMA_BAND",
     "DEFAULT_INFRASLOW_BAND",
     "DEFAULT_SF_ENV",
     "DEFAULT_WINDOW_SEC",
-    "sigma_power_envelope",
-    "spindle_rate_series",
+    "power_envelope",
     "infraslow_spectrum",
-    "sigma_infraslow_oscillation",
-    "spindle_infraslow_oscillation",
-    "average_spindle_spectrum",
 ]

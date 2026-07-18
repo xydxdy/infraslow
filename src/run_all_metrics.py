@@ -14,10 +14,10 @@ write with no rewrite cost as the cohort grows.
 
 Metadata is read from *two* source CSVs and combined by subject ``ID`` (a
 subject is kept if it appears in *either* file; see :func:`~infraslow.processing.
-all_metrics.combine_bioserenity_metadata`), matching ``src/match_cohort.py``.
+subject_pipeline.combine_bioserenity_metadata`), matching ``src/match_cohort.py``.
 
-The analysis itself is delegated to :mod:`infraslow.processing.all_metrics`
-(:func:`~infraslow.processing.all_metrics.calculate_subject_v2`). This script
+The analysis itself is delegated to :mod:`infraslow.processing.subject_pipeline`
+(:func:`~infraslow.processing.subject_pipeline.calculate_features`). This script
 only adds a CLI, per-subject process-level parallelism, resumable
 checkpointing, OOM-resilient execution, and HPC-friendly logging.
 
@@ -96,14 +96,14 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from infraslow.io.hypnodensity import DEFAULT_HYPNODENSITY_SUFFIX
-from infraslow.processing.all_metrics import (
+from infraslow.processing.subject_pipeline import (
     CHANNELS,
     METADATA_COLUMNS,
     MIN_BOUT_SEC,
     NPZ_STAGES,
     SF,
     STAGE_EVENT_FIELDS,
-    calculate_subject_v2,
+    calculate_features,
     combine_bioserenity_metadata,
     empty_stage_events,
     find_valid_bioserenity_subjects,
@@ -131,7 +131,7 @@ DEFAULT_CHUNK_SIZE = 40     # subjects per recycled worker pool
 # Concurrency cap so workers fit job memory. Six channels are now loaded and
 # analysed per subject (vs. one previously), so this is sized well above a
 # single-channel run; tune with --mem-per-worker-gb for your job's --mem.
-DEFAULT_MEM_PER_WORKER_GB = 6.0
+DEFAULT_MEM_PER_WORKER_GB = 5.0
 
 # errors.csv schema: subject-level failures leave state/channel/traceback blank;
 # channel- or stage-level issues (a subject that otherwise succeeded) fill them in.
@@ -140,7 +140,7 @@ ERROR_COLUMNS = ["subject_id", "state", "channel", "error_type", "error_message"
 # A single unit of work: (subject_id, metadata_row, edf_path, hypno_path, params, npz_dir).
 Task = Tuple[str, Dict[str, Any], str, str, Dict[str, Any], str]
 # A worker outcome: (status, subject_id, payload, issues) -- issues is always a
-# list of channel/stage-level error records (see all_metrics._issue), even on
+# list of channel/stage-level error records (see subject_pipeline._issue), even on
 # an "ok" outcome (a subject can succeed overall with some channels/stages failed).
 Outcome = Tuple[str, str, Dict[str, Any], List[Dict[str, str]]]
 
@@ -168,7 +168,7 @@ def process_subject(task: Task) -> Outcome:
     subject_id, metadata_row, edf_path, hypno_path, params, npz_dir = task
     raw_issues: List[Dict[str, str]] = []
     try:
-        row, events = calculate_subject_v2(
+        row, events = calculate_features(
             metadata_row, Path(edf_path), Path(hypno_path), issues_out=raw_issues, **params
         )
         try:
@@ -186,7 +186,7 @@ def process_subject(task: Task) -> Outcome:
 
 
 def _issue_record(subject_id: str, issue: Dict[str, str]) -> Dict[str, str]:
-    """Map an all_metrics channel/stage issue (key ``stage``) to the errors.csv row (key ``state``)."""
+    """Map a subject_pipeline channel/stage issue (key ``stage``) to the errors.csv row (key ``state``)."""
     return {
         "subject_id": subject_id,
         "state": issue.get("stage", ""),
@@ -314,7 +314,7 @@ def write_subject_channel_events(
     """Write one subject's per-channel infraslow events to ``{npz_dir}/{stage}/{ID}.npz``.
 
     ``events`` is ``{channel: {stage: {...}}}`` (see :func:`~infraslow.processing.
-    all_metrics.calculate_subject_channel_events`; keys are :data:`STAGE_EVENT_FIELDS`).
+    subject_pipeline.calculate_features_channel_events`; keys are :data:`STAGE_EVENT_FIELDS`).
 
     One ``{ID}.npz`` per subject *per stage* (not one consolidated file): with a
     100k+-subject cohort, rewriting a single growing ``.npz`` on every checkpoint
@@ -459,7 +459,7 @@ def load_channel_events(npz_path: Path, channel: str) -> Dict[str, np.ndarray]:
         print(events["bout_start"].shape, events["spindle_peak"].shape)
 
     Returns:
-        Dict keyed by :data:`~infraslow.processing.all_metrics.STAGE_EVENT_FIELDS`
+        Dict keyed by :data:`~infraslow.processing.subject_pipeline.STAGE_EVENT_FIELDS`
         (``freqs``, ``corr_mean``, ``spindle_start/stop/peak``, ``bout_start/stop/n_spindles``).
     """
     with np.load(npz_path, allow_pickle=False) as data:

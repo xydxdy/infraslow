@@ -262,126 +262,13 @@ def spindles_detect(
     return result
 
 
-# --------------------------------------------------------------------------- #
-# Multi-subject detection, aggregation, and plotting
-# --------------------------------------------------------------------------- #
-# Suggested EEG channels to load for spindle work when constructing the loaders
-# passed to ``detect_subjects_spindles`` (detection then runs on one of them).
+# Suggested EEG channels to load for spindle work (used by the subject_pipeline
+# module; see infraslow.processing.subject_pipeline.CHANNELS).
 DEFAULT_EEG_CHANNELS: Tuple[str, ...] = ("F3", "F4", "C3", "C4", "O1", "O2")
-
-
-def detect_subjects_spindles(
-    loaders: Iterable[Any],
-    *,
-    channel: str = "C3",
-    include: Iterable[int] = NREM_STAGES,
-    skip_errors: bool = True,
-    verbose: bool = True,
-    **detect_kwargs: Any,
-) -> "dict[str, SpindlesResult]":
-    """Detect spindles on one EEG channel for each pre-built subject loader.
-
-    Runner for the multi-subject workflow: given already-constructed
-    :class:`~infraslow.io.psg_loader.BioserenityPSGLoader` objects (one per
-    subject), it loads any that have not been loaded yet, then runs
-    :func:`spindles_detect` on ``channel`` restricted to ``include`` stages
-    (default NREM). Constructing the loaders -- choice of sampling rate, requested
-    channels, alias map and annotation loader -- is the caller's responsibility,
-    which keeps detection decoupled from loading (and this module free of any
-    top-level dependency on the io layer).
-
-    Returns an ordered ``{subject_id: SpindlesResults-or-None}`` mapping -- the
-    value is ``None`` when no spindle is found, or when the subject errored and
-    ``skip_errors`` is True (a warning is logged).
-
-    Args:
-        loaders: Iterable of ``BioserenityPSGLoader`` objects (or any object
-            exposing ``subject_id``, ``is_loaded``/``load()``, ``get_channel``,
-            ``sf`` and ``annotations``). Each is loaded in place if not already.
-        channel: Canonical EEG channel to detect on (must have been resolved by
-            each loader, i.e. included in its ``requested_channels``).
-        include: Sleep stages (YASA integer codes) to detect within.
-        skip_errors: If True, a failing subject is logged and stored as ``None``
-            instead of aborting the whole batch.
-        verbose: Print a one-line per-subject detection count.
-        **detect_kwargs: Forwarded to :func:`spindles_detect`.
-    """
-    results: "dict[str, SpindlesResult]" = {}
-    for loader in loaders:
-        sid = str(getattr(loader, "subject_id", loader))
-        try:
-            res = spindles_detect(
-                loader, ch_names=channel, include=include, **detect_kwargs
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad subject must not abort the batch
-            if not skip_errors:
-                raise
-            logger.warning("Subject %s failed; skipping: %s", sid, exc)
-            res = None
-        if verbose:
-            n = 0 if res is None else len(res.summary())
-            print(f"Subject {sid}: {n} spindle(s) detected on {channel}.")
-        results[sid] = res
-    return results
-
-
-def _per_subject_event_means(
-    results: Mapping[str, "SpindlesResult"], aggfunc: str
-) -> "dict[str, pd.Series]":
-    """Collapse each subject's events to one mean row of numeric features.
-
-    Uses YASA's grouped ``summary`` (which adds ``Count`` and, when staged,
-    ``Density``) and averages across any channel/stage groups so each subject
-    contributes a single row. Falls back to stage-agnostic grouping for results
-    detected without a hypnogram.
-    """
-    per_subject: "dict[str, pd.Series]" = {}
-    for sid, res in results.items():
-        if res is None:
-            continue
-        try:
-            grouped = res.summary(grp_chan=True, grp_stage=True, aggfunc=aggfunc)
-        except (KeyError, ValueError):
-            grouped = res.summary(grp_chan=True, grp_stage=False, aggfunc=aggfunc)
-        per_subject[sid] = grouped.select_dtypes("number").mean()
-    return per_subject
-
-
-def aggregate_spindle_summaries(
-    results: Mapping[str, "SpindlesResult"],
-    *,
-    aggfunc: str = "mean",
-) -> Tuple["pd.DataFrame", "pd.Series"]:
-    """Per-subject event averages, plus their mean across subjects.
-
-    Implements "average of all events detected in each subject, then mean those
-    together across subjects": each subject's detected events are averaged into a
-    single row (``Count``, ``Density``, ``Duration``, ``Amplitude``, ``Frequency``,
-    ...), and the grand summary is the mean of those rows -- every subject weighted
-    equally. Subjects with no spindles (``None``) are skipped.
-
-    Returns:
-        ``(per_subject_df, grand_mean)`` -- ``per_subject_df`` has one row per
-        subject (index ``subject_id``); ``grand_mean`` is its column-wise mean
-        across subjects.
-
-    Raises:
-        ValueError: if no subject had any detected spindles.
-    """
-    per_subject = _per_subject_event_means(results, aggfunc)
-    if not per_subject:
-        raise ValueError("No subject had any detected spindles to aggregate.")
-    per_subject_df = pd.DataFrame(per_subject).T
-    per_subject_df.index.name = "subject_id"
-    grand_mean = per_subject_df.mean()
-    grand_mean.name = f"mean_of_{len(per_subject_df)}_subjects"
-    return per_subject_df, grand_mean
 
 
 __all__ = [
     "spindles_detect",
-    "detect_subjects_spindles",
-    "aggregate_spindle_summaries",
     "NREM_STAGES",
     "DEFAULT_EPOCH_SEC",
     "DEFAULT_STAGE_MAP",
