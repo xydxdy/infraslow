@@ -44,7 +44,7 @@ from ..io.hypnodensity import (
 )
 from ..io.psg_loader import BioserenityPSGLoader
 from ..io.utils import list_dir_filenames, progress_iter
-from .detection import (
+from .spindle import (
     DEFAULT_EEG_CHANNELS,
     DEFAULT_EPOCH_SEC,
     DEFAULT_STAGE_MAP,

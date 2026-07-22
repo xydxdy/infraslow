@@ -267,10 +267,48 @@ def spindles_detect(
 DEFAULT_EEG_CHANNELS: Tuple[str, ...] = ("F3", "F4", "C3", "C4", "O1", "O2")
 
 
+def spindle_rate_per_min(npz, channel: str) -> Tuple[float, float]:
+    """``(rate, sem)`` spindles/min for ONE subject/channel, from
+    ``{channel}__bouts__n_spindles``/``__start``/``__stop`` (as written by
+    :func:`~infraslow.processing.subject_pipeline.calculate_channel_events`), or
+    ``(NaN, NaN)`` if there are no bouts for this channel.
+
+    ``rate`` pools all of this subject's bouts into a single rate: total
+    spindles over total bout duration. This collapses all of a subject's bouts
+    into one per-subject rate -- callers must average these per-subject rates
+    across subjects (not pool raw per-bout counts across subjects), otherwise
+    subjects with more/longer bouts would be over-weighted relative to subjects
+    with fewer bouts.
+
+    ``sem`` is the SEM, across this subject's own bouts, of each bout's own
+    spindles/min rate: ``0.0`` with exactly one bout, ``NaN`` with none.
+    """
+    n_key, start_key, stop_key = f"{channel}__bouts__n_spindles", f"{channel}__bouts__start", f"{channel}__bouts__stop"
+    if n_key not in npz.files or start_key not in npz.files or stop_key not in npz.files:
+        return np.nan, np.nan
+    n_spindles, start, stop = npz[n_key], npz[start_key], npz[stop_key]
+    if n_spindles.size == 0:
+        return np.nan, np.nan
+    duration_sec = stop - start
+    total_sec = float(duration_sec.sum())
+    if total_sec <= 0:
+        return np.nan, np.nan
+    rate = float(n_spindles.sum()) / (total_sec / 60.0)
+
+    duration_min = duration_sec / 60.0
+    valid = duration_min > 0
+    if not valid.any():
+        return rate, np.nan
+    per_bout_rate = n_spindles[valid] / duration_min[valid]
+    sem = float(per_bout_rate.std(ddof=1) / np.sqrt(per_bout_rate.size)) if per_bout_rate.size > 1 else 0.0
+    return rate, sem
+
+
 __all__ = [
     "spindles_detect",
     "NREM_STAGES",
     "DEFAULT_EPOCH_SEC",
     "DEFAULT_STAGE_MAP",
     "DEFAULT_EEG_CHANNELS",
+    "spindle_rate_per_min",
 ]

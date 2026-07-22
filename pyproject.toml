@@ -15,7 +15,6 @@ dependencies = [
     "yasa",
     "seaborn",
     "lunapi==1.6.5",
-    "scikit-learn",
     "statsmodels",
     "matplotlib",
     "joblib",

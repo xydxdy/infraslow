@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
-from ..processing.detection import (
+from ..processing.spindle import (
     DEFAULT_EPOCH_SEC,
     DEFAULT_STAGE_MAP,
     _extract_epoch_stages,
@@ -50,13 +50,13 @@ def plot_hypnogram(
             place if not already.
         spindles: Optional spindle detection result for the *same* recording --
             a YASA ``SpindlesResults`` (from
-            :func:`~infraslow.processing.detection.spindles_detect`), its
+            :func:`~infraslow.processing.spindle.spindles_detect`), its
             ``summary()`` DataFrame, or a 1-D array of event times in seconds.
             ``None`` (default) plots the hypnogram alone.
         epoch_sec: Seconds per scored epoch (sets ``sf_hypno = 1/epoch_sec``).
         stage_map, stage_column: How to map the per-epoch stage labels to YASA
             integer codes (same contract as
-            :func:`~infraslow.processing.detection.spindles_detect`).
+            :func:`~infraslow.processing.spindle.spindles_detect`).
         mark: Spindle summary column to mark (``"Peak"``, ``"Start"``, ``"End"``).
         mark_color, mark_alpha: Colour/opacity of the spindle marker lines.
         ax: Existing Axes to draw on; YASA creates one when ``None``.

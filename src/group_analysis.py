@@ -8,28 +8,39 @@ Restricted, throughout, to::
 No other stage/channel is ever combined in, and no metadata (age/gender/BMI,
 sleep architecture) is loaded here.
 
-This script builds *subject-level* N2-C3 results on top of
-``demo_infraslow_yasa_compare.py``, which only ever fits a bi-Gaussian ISFS
-curve to the *cross-subject average* spectrum per stage/channel -- it has no
+This script builds *subject-level* N2-C3 results on top of the same
+bi-Gaussian ISFS fit that ``infraslow_yasa_compare.py`` fits to the
+*cross-subject average* spectrum per stage/channel -- that script has no
 notion of a per-subject summary row. Per subject/channel/stage, the pipeline
 (``infraslow.processing.subject_pipeline``) writes only
 ``{channel}__spectra__freqs`` / ``{channel}__spectra__corr_mean`` (an
 already bout-averaged, baseline-corrected, unit-band-area relative spectrum --
 there is no separately-stored raw/baseline spectrum) plus that channel's bout
 and spindle arrays, to ``{results}/{stage}/{subject_id}.npz``. So this script
-reuses ``demo_infraslow_yasa_compare``'s own ``fit_isfs`` / ``bigaussian`` /
+reuses ``infraslow.processing.infraslow``'s ``fit_isfs`` / ``bigaussian`` /
 ``chromatogram_peak_area`` functions, applied to *each subject's own*
 ``corr_mean`` curve (instead of the cross-subject average) to derive
 ``peak_freq_hz, peak_period_s, bandwidth_hz, auc, chromatogram_peak_area`` and
 ``power`` (the fitted bi-Gaussian peak amplitude -- the same "power" the demo
-script itself uses to pick its "max power channel"). ``spindle_per_min`` reuses
-the demo's own ``_spindle_rate_per_min`` verbatim; ``spindle_per_min_SEM`` (not
-computed anywhere upstream) is a per-subject extension: the SEM, across that
-subject's own bouts, of each bout's own spindles/min rate.
+script itself uses to pick its "max power channel"). The spindle-rate columns
+(``spindle_per_min``/``spindle_per_min_SEM`` by default) come straight from
+``infraslow.processing.spindle.spindle_rate_per_min``, which is always
+per-minute; ``--rate-unit hr`` scales both by 60 and renames every column,
+report line, and plot label to ``spindle_per_hr``/``spindle_per_hr_SEM``
+throughout (see :func:`_rate_columns`).
+
+``--dominant-freq-hz`` optionally groups subjects by their own N2-C3 dominant
+infraslow peak (``dominant_freq_hz``, the frequency bin with the highest
+baseline-corrected relative power -- a fixed Welch grid point, not the
+continuous bi-Gaussian ``peak_freq_hz``) *before* the rest of the pipeline
+runs, restricting Step 3 onward to that subset -- e.g. run this script once
+per dominant-frequency bin, each with a different ``--output-dir``, to
+compare low/high spindle-rate groups separately within each dominant-peak
+group instead of across the whole cohort.
 
 Per-subject loading (Step 2) is both I/O-bound (one npz open per subject) and
 CPU-bound (a ``scipy.optimize.curve_fit`` bi-Gaussian fit per subject) -- unlike
-``demo_infraslow_yasa_compare.py``'s cohort loading, which is I/O-only and uses
+``infraslow_yasa_compare.py``'s cohort loading, which is I/O-only and uses
 a thread pool. So this script loads across a **process** pool
 (:func:`load_subject_records_from_npz`) instead: threads would serialize the
 curve-fit work behind the GIL, while separate processes get true multi-core
@@ -49,12 +60,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 
 # Keep every worker process single-threaded for BLAS/OpenMP so the
 # ProcessPoolExecutor below (one process per core) doesn't oversubscribe
-# cores -- must be set before numpy/scipy (and demo_infraslow_yasa_compare,
-# which imports both) are imported. Matches run_all_metrics.py.
+# cores -- must be set before numpy/scipy are imported. Matches run_all_metrics.py.
 for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
@@ -66,93 +75,96 @@ from typing import Dict, List, Optional, Tuple  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-# ``demo_infraslow_yasa_compare`` lives beside this script; make it importable
-# regardless of the current working directory (matches run_all_metrics.py).
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-
-import demo_infraslow_yasa_compare as demo  # noqa: E402 - see sys.path shim above
+from infraslow.io.utils import N_IO_WORKERS  # noqa: E402
+from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs  # noqa: E402
+from infraslow.processing.spindle import spindle_rate_per_min  # noqa: E402
+from infraslow.processing.subject_pipeline import INFRASLOW_BAND  # noqa: E402
 from infraslow.stats.group_assignment import (  # noqa: E402
     HIGH_LABEL,
     LOW_LABEL,
+    MID_LABEL,
     assign_spindle_rate_groups,
 )
 from infraslow.stats.group_comparison import compare_parameters  # noqa: E402
 from infraslow.viz.group_analysis import (  # noqa: E402
+    plot_cohort_infraslow_compare,
+    plot_cohort_spectrum_clean,
     plot_group_infraslow_compare,
     plot_group_spectrum_clean,
     plot_parameter_comparisons,
+    plot_parameter_distributions,
     plot_spindle_rate_distribution,
+    plot_spindle_rate_pretransform,
 )
 
 logger = logging.getLogger(__name__)
 
-#: Required per-subject summary columns (md/group_analysis.md Step 2/3).
-REQUIRED_SUMMARY_PARAMS: List[str] = [
-    "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc",
-    "chromatogram_peak_area", "spindle_per_min", "spindle_per_min_SEM",
-]
-#: Parameters compared between spindle-rate groups (Step 5). `spindle_per_min`
-#: is deliberately excluded -- the groups are *constructed* from it, so testing
-#: it again would not be independent evidence (md/group_analysis.md Step 4/5).
+#: Multiply ``infraslow.processing.spindle.spindle_rate_per_min``'s native
+#: per-minute rate/SEM by this to express it in the CLI-selected ``--rate-unit``.
+RATE_UNIT_PER_MINUTE_FACTOR: Dict[str, float] = {"min": 1.0, "hr": 60.0}
+
+
+def _rate_columns(rate_unit: str) -> Tuple[str, str]:
+    """``(rate_col, rate_sem_col)`` for the given ``--rate-unit``, e.g.
+    ``("spindle_per_min", "spindle_per_min_SEM")`` or
+    ``("spindle_per_hr", "spindle_per_hr_SEM")``."""
+    rate_col = f"spindle_per_{rate_unit}"
+    return rate_col, f"{rate_col}_SEM"
+
+
+def required_summary_params(rate_unit: str) -> List[str]:
+    """Required per-subject summary columns (md/group_analysis.md Step 2/3),
+    tokenized on the chosen ``--rate-unit``."""
+    rate_col, rate_sem_col = _rate_columns(rate_unit)
+    return [
+        "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc",
+        "chromatogram_peak_area", rate_col, rate_sem_col,
+    ]
+
+
+#: Parameters compared between spindle-rate groups (Step 5). The spindle-rate
+#: column itself is deliberately excluded -- the groups are *constructed* from
+#: it, so testing it again would not be independent evidence
+#: (md/group_analysis.md Step 4/5).
 COMPARISON_PARAMETERS: List[str] = [
     "power", "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc", "chromatogram_peak_area",
 ]
 #: Documented tolerance for the peak_period_s ≈ 1/peak_freq_hz consistency check (Step 3).
 PERIOD_FREQ_TOLERANCE = 1e-6
+#: Floating-point tolerance for matching --dominant-freq-hz against dominant_freq_hz --
+#: both sit on the same fixed Welch grid, so this only needs to absorb float noise, not
+#: bridge distinct grid points (spacing 1/WINDOW_SEC = 0.01 Hz, see subject_pipeline.py).
+DOMINANT_FREQ_TOLERANCE = 1e-6
 
 
 # --------------------------------------------------------------------------- #
 # Step 2: load subject-level N2-C3 results
 # --------------------------------------------------------------------------- #
-def _subject_channel_spindle_rate(npz, channel: str) -> Tuple[float, float, int]:
-    """``(spindle_per_min, spindle_per_min_SEM, n_bouts)`` for one subject/channel.
-
-    ``spindle_per_min`` reuses
-    ``demo_infraslow_yasa_compare._spindle_rate_per_min`` verbatim (pools this
-    subject's own bouts into one rate: total spindles / total bout duration).
-    ``spindle_per_min_SEM`` extends it -- the existing pipeline has no
-    per-subject SEM -- as the SEM, across this subject's own bouts, of each
-    bout's own spindles/min rate: ``0.0`` with exactly one bout, ``NaN`` with none.
-    """
-    n_key = f"{channel}__bouts__n_spindles"
-    start_key = f"{channel}__bouts__start"
-    stop_key = f"{channel}__bouts__stop"
-    if n_key not in npz.files or start_key not in npz.files or stop_key not in npz.files:
-        return np.nan, np.nan, 0
-    n_spindles, start, stop = npz[n_key], npz[start_key], npz[stop_key]
-    if n_spindles.size == 0:
-        return np.nan, np.nan, 0
-    duration_min = (stop - start) / 60.0
-    valid = duration_min > 0
-    if not valid.any():
-        return np.nan, np.nan, 0
-    per_bout_rate = n_spindles[valid] / duration_min[valid]
-    overall_rate = demo._spindle_rate_per_min(npz, channel)
-    sem = float(per_bout_rate.std(ddof=1) / np.sqrt(per_bout_rate.size)) if per_bout_rate.size > 1 else 0.0
-    return overall_rate, sem, int(per_bout_rate.size)
-
-
-def _empty_subject_record(subject_id: str, stage: str, channel: str) -> Dict[str, object]:
+def _empty_subject_record(subject_id: str, stage: str, channel: str, rate_unit: str) -> Dict[str, object]:
+    rate_col, rate_sem_col = _rate_columns(rate_unit)
     return dict(
         subject_id=subject_id, sleep_stage=stage, channel=channel,
         peak_freq_hz=np.nan, peak_period_s=np.nan, bandwidth_hz=np.nan, power=np.nan,
-        auc=np.nan, chromatogram_peak_area=np.nan, spindle_per_min=np.nan, spindle_per_min_SEM=np.nan,
+        auc=np.nan, chromatogram_peak_area=np.nan, dominant_freq_hz=np.nan,
+        **{rate_col: np.nan, rate_sem_col: np.nan},
         freqs=None, corr_mean=None, fitted_curve=None, fitted_freqs=None, exclusion_reason="",
     )
 
 
-def _load_subject_record(npz_path: Path, stage: str, channel: str) -> Dict[str, object]:
+def _load_subject_record(npz_path: Path, stage: str, channel: str, rate_unit: str = "min") -> Dict[str, object]:
     """One raw (pre-validation) N2-C3 record for one subject, from its per-stage npz.
 
     Never raises: any problem is captured in ``exclusion_reason`` for
     :func:`validate_records` to report -- a missing key or an empty/failed
     spectrum is an expected outcome for some subjects at this cohort's scale,
     not a hard error (md/group_analysis.md Step 2/3).
+
+    ``rate_unit`` selects the spindle-rate columns' unit ("min" or "hr");
+    :func:`~infraslow.processing.spindle.spindle_rate_per_min` always returns a
+    per-minute ``(rate, sem)``, scaled here by :data:`RATE_UNIT_PER_MINUTE_FACTOR`.
     """
     subject_id = npz_path.stem
-    record = _empty_subject_record(subject_id, stage, channel)
+    record = _empty_subject_record(subject_id, stage, channel, rate_unit)
     try:
         with np.load(npz_path) as npz:
             freq_key, corr_key = f"{channel}__spectra__freqs", f"{channel}__spectra__corr_mean"
@@ -174,19 +186,26 @@ def _load_subject_record(npz_path: Path, stage: str, channel: str) -> Dict[str, 
                 return record
 
             record["freqs"], record["corr_mean"] = freqs, corr_mean
+            # The subject's own dominant infraslow peak: the frequency bin (on the
+            # fixed Welch grid, see infraslow.processing.subject_pipeline.WINDOW_SEC)
+            # with the highest baseline-corrected relative power -- independent of
+            # whether the bi-Gaussian fit below succeeds, unlike peak_freq_hz.
+            record["dominant_freq_hz"] = float(freqs[int(np.argmax(corr_mean))])
 
-            rate, rate_sem, _n_bouts = _subject_channel_spindle_rate(npz, channel)
-            record["spindle_per_min"], record["spindle_per_min_SEM"] = rate, rate_sem
+            rate_col, rate_sem_col = _rate_columns(rate_unit)
+            rate, sem = spindle_rate_per_min(npz, channel)
+            factor = RATE_UNIT_PER_MINUTE_FACTOR[rate_unit]
+            record[rate_col], record[rate_sem_col] = rate * factor, sem * factor
 
             try:
-                fit = demo.fit_isfs(freqs, corr_mean)
+                fit = fit_isfs(freqs, corr_mean)
             except RuntimeError as exc:
                 record["exclusion_reason"] = f"bi-Gaussian fit failed: {exc}"
                 return record
 
-            fitted_freqs = np.linspace(*demo.INFRASLOW_BAND, 200)
-            fitted_curve = demo.bigaussian(fitted_freqs, *fit["popt"])
-            peak = demo.chromatogram_peak_area(fitted_freqs, fitted_curve, threshold=fit["threshold"])
+            fitted_freqs = np.linspace(*INFRASLOW_BAND, 200)
+            fitted_curve = bigaussian(fitted_freqs, *fit["popt"])
+            peak = chromatogram_peak_area(fitted_freqs, fitted_curve, threshold=fit["threshold"])
 
             record["peak_freq_hz"] = fit["mu"]
             record["peak_period_s"] = 1.0 / fit["mu"] if fit["mu"] else np.nan
@@ -212,11 +231,11 @@ def resolve_workers(cli_workers: Optional[int]) -> int:
 
 def load_subject_records_from_npz(
     results_dir: Path, stage: str, channel: str, *,
-    n_subjects: Optional[int] = None, workers: Optional[int] = None,
+    n_subjects: Optional[int] = None, workers: Optional[int] = None, rate_unit: str = "min",
 ) -> pd.DataFrame:
     """Every subject's raw N2-C3 record from ``{results_dir}/{stage}/*.npz`` (Step 2).
 
-    Same directory layout as ``demo_infraslow_yasa_compare.py``'s
+    Same directory layout as ``infraslow_yasa_compare.py``'s
     ``--results-dir``, but loaded across a **process** pool rather than a
     thread pool: each subject's record also runs a ``scipy.optimize.curve_fit``
     bi-Gaussian fit (CPU-bound), which would serialize behind the GIL under
@@ -241,7 +260,7 @@ def load_subject_records_from_npz(
         len(paths), stage_dir, channel, n_workers, chunksize,
     )
 
-    worker = partial(_load_subject_record, stage=stage, channel=channel)
+    worker = partial(_load_subject_record, stage=stage, channel=channel, rate_unit=rate_unit)
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         records = list(pool.map(worker, paths, chunksize=chunksize))
     logger.info("loaded %d subject record(s)", len(records))
@@ -262,15 +281,16 @@ def _load_spectrum_arrays(
 
 
 def load_subject_records_from_files(
-    summary_path: Path, spectrum_dir: Optional[Path], stage: str, channel: str,
+    summary_path: Path, spectrum_dir: Optional[Path], stage: str, channel: str, rate_unit: str = "min",
 ) -> pd.DataFrame:
     """Alternate load path: a precomputed subject-level summary CSV, optionally
     paired with a separate npz root for the Step 6 spectrum arrays.
 
     Args:
         summary_path: CSV with at least ``subject_id, sleep_stage, channel``
-            plus :data:`REQUIRED_SUMMARY_PARAMS` (``power`` optional; filled
-            with NaN if absent).
+            plus :func:`required_summary_params` (``power`` optional; filled
+            with NaN if absent) -- the spindle-rate columns must already be
+            named for the given ``rate_unit`` (e.g. ``spindle_per_hr``).
         spectrum_dir: A ``{stage}/{subject_id}.npz`` root providing
             ``{channel}__spectra__freqs`` / ``{channel}__spectra__corr_mean``.
             If omitted, every subject fails Step 3's spectrum-array checks and
@@ -282,7 +302,10 @@ def load_subject_records_from_files(
         ValueError: if a required column is missing from ``summary_path``.
     """
     df = pd.read_csv(summary_path, dtype={"subject_id": str})
-    missing_cols = [c for c in ["subject_id", "sleep_stage", "channel", *REQUIRED_SUMMARY_PARAMS] if c not in df.columns]
+    missing_cols = [
+        c for c in ["subject_id", "sleep_stage", "channel", *required_summary_params(rate_unit)]
+        if c not in df.columns
+    ]
     if missing_cols:
         raise ValueError(f"{summary_path} is missing required column(s): {missing_cols}")
     if "power" not in df.columns:
@@ -292,18 +315,21 @@ def load_subject_records_from_files(
     df["corr_mean"] = None
     df["fitted_curve"] = None
     df["fitted_freqs"] = None
+    df["dominant_freq_hz"] = np.nan
 
     if spectrum_dir is not None:
         stage_dir = spectrum_dir / stage
         paths = [stage_dir / f"{subject_id}.npz" for subject_id in df["subject_id"]]
         # Pure I/O here (no per-subject curve fit, unlike the --results/npz path),
         # so a thread pool -- whose blocking npz reads release the GIL -- is enough.
-        with ThreadPoolExecutor(max_workers=demo.N_IO_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=N_IO_WORKERS) as pool:
             spectra = list(pool.map(lambda p: _load_spectrum_arrays(p, channel), paths))
         for idx, (freqs, corr_mean) in zip(df.index, spectra):
             if freqs is not None:
                 df.at[idx, "freqs"] = freqs
                 df.at[idx, "corr_mean"] = corr_mean
+                if corr_mean.size:
+                    df.at[idx, "dominant_freq_hz"] = float(freqs[int(np.argmax(corr_mean))])
     return df
 
 
@@ -328,7 +354,8 @@ def _spectrum_problem(freqs, corr_mean) -> str:
 
 
 def validate_records(
-    df: pd.DataFrame, sleep_stage: str, channel: str, *, tolerance: float = PERIOD_FREQ_TOLERANCE,
+    df: pd.DataFrame, sleep_stage: str, channel: str, *,
+    tolerance: float = PERIOD_FREQ_TOLERANCE, rate_unit: str = "min",
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     """Split raw per-subject records into (validated, excluded) + a validation report (Step 3).
 
@@ -342,6 +369,8 @@ def validate_records(
     df = df.copy()
     n_total = len(df)
     df["exclusion_reason"] = df["exclusion_reason"].fillna("").astype(str)
+    rate_col, rate_sem_col = _rate_columns(rate_unit)
+    required_params = required_summary_params(rate_unit)
 
     def _set_reason(mask: pd.Series, reason: str) -> None:
         mask = mask.fillna(False)
@@ -354,8 +383,8 @@ def validate_records(
     _set_reason(df["sleep_stage"].astype(str) != sleep_stage, "incorrect sleep state")
     _set_reason(df["channel"].astype(str) != channel, "incorrect channel")
 
-    _set_reason(df["spindle_per_min"] < 0, "negative spindle_per_min")
-    _set_reason(df["spindle_per_min_SEM"] < 0, "negative spindle_per_min_SEM")
+    _set_reason(df[rate_col] < 0, f"negative {rate_col}")
+    _set_reason(df[rate_sem_col] < 0, f"negative {rate_sem_col}")
     _set_reason(df["peak_freq_hz"] <= 0, "nonpositive peak_freq_hz")
     _set_reason(df["peak_period_s"] <= 0, "nonpositive peak_period_s")
     _set_reason(df["bandwidth_hz"] < 0, "negative bandwidth_hz")
@@ -363,13 +392,13 @@ def validate_records(
     _set_reason(df["chromatogram_peak_area"] < 0, "negative chromatogram_peak_area")
 
     missingness = {}
-    for col in REQUIRED_SUMMARY_PARAMS:
+    for col in required_params:
         missing = df[col].isna()
         missingness[col] = int(missing.sum())
         _set_reason(missing, f"missing {col}")
 
     inf_mask = pd.Series(
-        np.isinf(df[REQUIRED_SUMMARY_PARAMS].to_numpy(dtype=float)).any(axis=1), index=df.index,
+        np.isinf(df[required_params].to_numpy(dtype=float)).any(axis=1), index=df.index,
     )
     _set_reason(inf_mask, "infinite value in a required parameter")
 
@@ -428,38 +457,40 @@ def format_validation_report(report: Dict[str, object], sleep_stage: str, channe
 
 
 def format_grouping_report(
-    fit_result, assignments: pd.DataFrame, threshold: float, sleep_stage: str, channel: str,
+    cutoff, assignments: pd.DataFrame, sleep_stage: str, channel: str, rate_unit: str = "min",
 ) -> str:
     n_low = int((assignments["spindle_group"] == LOW_LABEL).sum())
+    n_mid = int((assignments["spindle_group"] == MID_LABEL).sum())
     n_high = int((assignments["spindle_group"] == HIGH_LABEL).sum())
-    n_uncertain = int(assignments["uncertain_assignment"].sum())
-    centers = np.sort(fit_result.centers_original_scale)
     return "\n".join([
         f"{sleep_stage}-{channel} Spindle-Rate Grouping Report",
         "===================================",
-        f"GMM input scale selected : {fit_result.scale}",
-        f"Raw-scale BIC            : {fit_result.bic_raw:.2f}",
-        f"log1p-scale BIC          : {fit_result.bic_log1p:.2f}",
-        f"Component centers (spindles/min, low->high): {centers[0]:.3f}, {centers[1]:.3f}",
-        f"Uncertainty threshold    : group_probability < {threshold}",
+        f"Grouping method          : log1p mean ± std cutoff",
+        f"log1p mean, std          : {cutoff.log_mean:.4f}, {cutoff.log_std:.4f}",
+        f"Low cutoff  (log1p, spindles/{rate_unit}) : {cutoff.low_threshold:.4f}, "
+        f"{cutoff.low_threshold_original_scale:.3f}",
+        f"High cutoff (log1p, spindles/{rate_unit}) : {cutoff.high_threshold:.4f}, "
+        f"{cutoff.high_threshold_original_scale:.3f}",
         f"low_spindle_rate n       : {n_low}",
+        f"mid_spindle_rate n       : {n_mid}",
         f"high_spindle_rate n      : {n_high}",
-        f"uncertain assignments    : {n_uncertain}",
     ])
 
 
 # --------------------------------------------------------------------------- #
 # Step 6: group-level spectrum curve (mean/SEM across subjects + a fresh
-# group-level bi-Gaussian fit, matching demo_infraslow_yasa_compare's own
+# group-level bi-Gaussian fit, matching infraslow_yasa_compare's own
 # fit-on-the-average-curve approach -- distinct from Step 5's per-subject fits).
 # --------------------------------------------------------------------------- #
-def _group_mean_curve(freqs_list, corr_list) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    """``(freqs, mean, sem, n)`` across one group's subjects.
+def _group_mean_curve(freqs_list, corr_list) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
+    """``(freqs, mean, sem, n, individual_curves)`` across one group's subjects.
 
-    One row per subject is guaranteed by validation (Step 3), so no
-    within-subject duplicate-averaging is needed here. A subject whose
-    frequency grid differs from the group's first valid grid is skipped
-    (logged), never silently averaged onto a foreign grid.
+    ``individual_curves`` is the ``(n, len(freqs))`` stack every ``corr`` curve
+    was averaged from (each row one subject), for callers that also want to
+    plot per-subject lines. One row per subject is guaranteed by validation
+    (Step 3), so no within-subject duplicate-averaging is needed here. A
+    subject whose frequency grid differs from the group's first valid grid is
+    skipped (logged), never silently averaged onto a foreign grid.
     """
     ref_freqs = None
     stack = []
@@ -474,38 +505,44 @@ def _group_mean_curve(freqs_list, corr_list) -> Tuple[np.ndarray, np.ndarray, np
             continue
         stack.append(corr)
     if not stack:
-        return np.empty(0), np.empty(0), np.empty(0), 0
+        return np.empty(0), np.empty(0), np.empty(0), 0, np.empty((0, 0))
     arr = np.vstack(stack)
     n = arr.shape[0]
     mean = arr.mean(0)
     sem = arr.std(0, ddof=1) / np.sqrt(n) if n > 1 else np.zeros_like(mean)
-    return ref_freqs, mean, sem, n
+    return ref_freqs, mean, sem, n, arr
 
 
-def _build_group_plot_data(df_group: pd.DataFrame, infraslow_band: Tuple[float, float]) -> Dict[str, object]:
-    """freqs/mean/sem/n + a group-level bi-Gaussian fit, for one spindle-rate group."""
-    freqs, mean, sem, n = _group_mean_curve(df_group["freqs"].tolist(), df_group["corr_mean"].tolist())
+def _build_group_plot_data(
+    df_group: pd.DataFrame, infraslow_band: Tuple[float, float], rate_unit: str = "min",
+) -> Dict[str, object]:
+    """freqs/mean/sem/n/individual_curves + a group-level bi-Gaussian fit, for one spindle-rate group."""
+    freqs, mean, sem, n, individual_curves = _group_mean_curve(
+        df_group["freqs"].tolist(), df_group["corr_mean"].tolist()
+    )
     if n == 0:
         raise ValueError("No valid spectra available to build this group's spectrum curve.")
 
     try:
-        fit = demo.fit_isfs(freqs, mean, infraslow_band=infraslow_band)
+        fit = fit_isfs(freqs, mean, infraslow_band=infraslow_band)
     except RuntimeError:
         fit = None
     fitted_curve = fitted_freqs = None
     if fit is not None:
         fitted_freqs = np.linspace(*infraslow_band, 200)
-        fitted_curve = demo.bigaussian(fitted_freqs, *fit["popt"])
+        fitted_curve = bigaussian(fitted_freqs, *fit["popt"])
 
-    rates = df_group["spindle_per_min"].to_numpy(dtype=float)
+    rate_col, _ = _rate_columns(rate_unit)
+    rates = df_group[rate_col].to_numpy(dtype=float)
     rates = rates[np.isfinite(rates)]
-    spindle_per_min = float(rates.mean()) if rates.size else np.nan
-    spindle_per_min_sem = float(rates.std(ddof=1) / np.sqrt(rates.size)) if rates.size > 1 else 0.0
+    rate = float(rates.mean()) if rates.size else np.nan
+    rate_sem = float(rates.std(ddof=1) / np.sqrt(rates.size)) if rates.size > 1 else 0.0
 
     return dict(
         freqs=freqs, mean=mean, sem=sem, n=n, fit=fit,
         fitted_curve=fitted_curve, fitted_freqs=fitted_freqs,
-        spindle_per_min=spindle_per_min, spindle_per_min_sem=spindle_per_min_sem,
+        individual_curves=individual_curves,
+        rate=rate, rate_sem=rate_sem,
     )
 
 
@@ -519,7 +556,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--results", type=Path, default=None,
         help="Root of {sleep-stage}/{subject_id}.npz files (same layout as "
-             "demo_infraslow_yasa_compare.py's --results-dir). Used unless --summary-results is given.",
+             "infraslow_yasa_compare.py's --results-dir). Used unless --summary-results is given.",
     )
     parser.add_argument(
         "--summary-results", type=Path, default=None,
@@ -542,6 +579,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "but is not hardcoded -- e.g. F3/F4/C4/O1/O2 also work).",
     )
     parser.add_argument(
+        "--rate-unit", choices=["min", "hr"], default="min",
+        help="Unit for every spindle-rate column/label/plot: 'min' (spindles/min, "
+             "infraslow.processing.spindle.spindle_rate_per_min's native unit) or 'hr' "
+             "(spindles/hr, that per-minute rate/SEM scaled by 60). With --summary-results, "
+             "the CSV's spindle-rate columns must already be named for this unit "
+             "(e.g. spindle_per_hr/spindle_per_hr_SEM).",
+    )
+    parser.add_argument(
+        "--dominant-freq-hz", type=float, default=None,
+        help="Restrict the whole pipeline (Step 3 onward) to subjects whose own N2-C3 "
+             "dominant infraslow peak -- dominant_freq_hz, the frequency bin (on the fixed "
+             "Welch grid, spacing 1/WINDOW_SEC = 0.01 Hz) with the highest baseline-corrected "
+             "relative power in that subject's spectrum, independent of whether the "
+             "bi-Gaussian fit succeeds -- equals this value (within floating-point tolerance). "
+             "I.e. group subjects by their exact dominant frequency bin *before* running the "
+             "usual low/high spindle-rate grouping + comparison on just that subset. Omit to "
+             "use the whole validated cohort.",
+    )
+    parser.add_argument(
         "--output-dir", type=Path, default=None,
         help="Directory outputs are written to. Defaults to "
              "infraslow/results/group_analysis/{sleep-stage}_{channel}.",
@@ -550,9 +606,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--subject-id-column", default="subject_id",
         help="Subject-id column name in --summary-results, if not already 'subject_id'.",
     )
-    parser.add_argument("--group-probability-threshold", type=float, default=0.70)
     parser.add_argument("--fdr-alpha", type=float, default=0.05)
-    parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument(
         "--n-subjects", type=int, default=None,
         help="Cap the cohort to the first N sorted subjects (--results/npz loading path only); "
@@ -586,6 +640,7 @@ def _output_paths(output_dir: Path, sleep_stage: str, channel: str) -> Dict[str,
         "assignments": output_dir / f"{prefix}_subject_group_assignments.csv",
         "grouping_report": output_dir / f"grouping_report_{prefix}.txt",
         "comparison": output_dir / f"{prefix}_infraslow_group_comparison.csv",
+        "pretransform_png": output_dir / f"{prefix}_spindle_rate_pretransform_distribution.png",
         "distribution_png": output_dir / f"{prefix}_spindle_rate_group_distribution.png",
         "param_png": output_dir / f"{prefix}_parameter_group_comparisons.png",
         "param_pdf": output_dir / f"{prefix}_parameter_group_comparisons.pdf",
@@ -593,6 +648,13 @@ def _output_paths(output_dir: Path, sleep_stage: str, channel: str) -> Dict[str,
         "compare_pdf": output_dir / f"{prefix}_infraslow_group_compare.pdf",
         "clean_png": output_dir / f"{prefix}_infraslow_power_by_spindle_group.png",
         "clean_pdf": output_dir / f"{prefix}_infraslow_power_by_spindle_group.pdf",
+        # "Before" grouping: whole-cohort counterparts of the three plots above.
+        "param_before_png": output_dir / f"{prefix}_parameter_group_comparisons_before.png",
+        "param_before_pdf": output_dir / f"{prefix}_parameter_group_comparisons_before.pdf",
+        "compare_before_png": output_dir / f"{prefix}_infraslow_group_compare_before.png",
+        "compare_before_pdf": output_dir / f"{prefix}_infraslow_group_compare_before.pdf",
+        "clean_before_png": output_dir / f"{prefix}_infraslow_power_by_spindle_group_before.png",
+        "clean_before_pdf": output_dir / f"{prefix}_infraslow_power_by_spindle_group_before.pdf",
     }
 
 
@@ -602,9 +664,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         level=args.log_level, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger.info(
-        "group analysis starting: sleep_stage=%s channel=%s output_dir=%s",
-        args.sleep_stage, args.channel, args.output_dir,
+        "group analysis starting: sleep_stage=%s channel=%s rate_unit=%s output_dir=%s",
+        args.sleep_stage, args.channel, args.rate_unit, args.output_dir,
     )
+    rate_col, rate_sem_col = _rate_columns(args.rate_unit)
 
     outputs = _output_paths(args.output_dir, args.sleep_stage, args.channel)
     if not args.overwrite:
@@ -620,25 +683,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.summary_results is not None:
         raw_df = load_subject_records_from_files(
             args.summary_results, args.spectrum_results, args.sleep_stage, args.channel,
+            rate_unit=args.rate_unit,
         )
         if args.subject_id_column != "subject_id" and args.subject_id_column in raw_df.columns:
             raw_df = raw_df.rename(columns={args.subject_id_column: "subject_id"})
     else:
         raw_df = load_subject_records_from_npz(
             args.results, args.sleep_stage, args.channel,
-            n_subjects=args.n_subjects, workers=args.workers,
+            n_subjects=args.n_subjects, workers=args.workers, rate_unit=args.rate_unit,
         )
     raw_df["subject_id"] = raw_df["subject_id"].astype(str)
 
+    # --- Group subjects by their own exact dominant infraslow peak, before Step 3 ---
+    if args.dominant_freq_hz is not None:
+        dominant = pd.to_numeric(raw_df["dominant_freq_hz"], errors="coerce")
+        dominant_mask = np.isclose(dominant, args.dominant_freq_hz, atol=DOMINANT_FREQ_TOLERANCE, rtol=0.0)
+        n_before = len(raw_df)
+        raw_df = raw_df.loc[dominant_mask].reset_index(drop=True)
+        logger.info(
+            "dominant_freq_hz == %s group filter: %d/%d subject(s) kept",
+            args.dominant_freq_hz, len(raw_df), n_before,
+        )
+        if raw_df.empty:
+            raise SystemExit(f"No subjects with dominant_freq_hz == {args.dominant_freq_hz}; aborting.")
+
     # --- Step 3: validate -----------------------------------------------------
-    validated, excluded, report = validate_records(raw_df, args.sleep_stage, args.channel)
+    validated, excluded, report = validate_records(raw_df, args.sleep_stage, args.channel, rate_unit=args.rate_unit)
     if validated.empty:
         raise SystemExit(
             f"No valid {args.sleep_stage}-{args.channel} records available after validation "
             f"({report['n_excluded']}/{report['total_subjects_loaded']} excluded); aborting."
         )
 
-    save_cols = ["subject_id", "sleep_stage", "channel", *REQUIRED_SUMMARY_PARAMS, "power"]
+    save_cols = [
+        "subject_id", "sleep_stage", "channel", *required_summary_params(args.rate_unit),
+        "power", "dominant_freq_hz",
+    ]
     validated[save_cols].to_csv(outputs["validated"], index=False)
     excluded_save_cols = [c for c in save_cols if c in excluded.columns] + ["exclusion_reason"]
     excluded[excluded_save_cols].to_csv(outputs["excluded"], index=False)
@@ -650,34 +730,59 @@ def main(argv: Optional[List[str]] = None) -> int:
         len(validated), report["total_subjects_loaded"], report["n_excluded"],
     )
 
-    # --- Step 4: GMM group assignment -----------------------------------------
-    assignments, fit_result = assign_spindle_rate_groups(
-        validated["subject_id"], validated["spindle_per_min"], validated["spindle_per_min_SEM"],
-        random_state=args.random_state, probability_threshold=args.group_probability_threshold,
+    # --- "Before" grouping: whole-cohort infraslow + parameter plots ----------
+    infraslow_band = INFRASLOW_BAND
+    cohort_plot = _build_group_plot_data(validated, infraslow_band, rate_unit=args.rate_unit)
+    plot_cohort_infraslow_compare(
+        cohort=cohort_plot, infraslow_band=infraslow_band,
+        sleep_stage=args.sleep_stage, channel=args.channel,
+        output_png=outputs["compare_before_png"], output_pdf=outputs["compare_before_pdf"],
+        rate_unit=args.rate_unit,
+    )
+    plot_cohort_spectrum_clean(
+        cohort=cohort_plot, infraslow_band=infraslow_band,
+        sleep_stage=args.sleep_stage, channel=args.channel,
+        output_png=outputs["clean_before_png"], output_pdf=outputs["clean_before_pdf"],
+    )
+    plot_parameter_distributions(
+        df=validated, parameters=COMPARISON_PARAMETERS,
+        output_png=outputs["param_before_png"], output_pdf=outputs["param_before_pdf"],
+    )
+    logger.info(
+        "saved %s, %s, %s (before grouping)",
+        outputs["compare_before_png"], outputs["clean_before_png"], outputs["param_before_png"],
+    )
+
+    # --- Step 4: log1p mean +/- std cutoff group assignment --------------------
+    plot_spindle_rate_pretransform(
+        spindle_rate=validated[rate_col].to_numpy(), output_png=outputs["pretransform_png"],
+        rate_unit=args.rate_unit,
+    )
+    logger.info("saved %s", outputs["pretransform_png"])
+
+    assignments, cutoff = assign_spindle_rate_groups(
+        validated["subject_id"], validated[rate_col], validated[rate_sem_col],
+        rate_col=rate_col, rate_sem_col=rate_sem_col,
     )
     assignments.insert(1, "sleep_stage", args.sleep_stage)
     assignments.insert(2, "channel", args.channel)
     assignments.to_csv(outputs["assignments"], index=False)
     outputs["grouping_report"].write_text(
-        format_grouping_report(
-            fit_result, assignments, args.group_probability_threshold, args.sleep_stage, args.channel,
-        )
+        format_grouping_report(cutoff, assignments, args.sleep_stage, args.channel, rate_unit=args.rate_unit)
     )
     plot_spindle_rate_distribution(
-        spindle_per_min=assignments["spindle_per_min"].to_numpy(),
+        spindle_rate=assignments[rate_col].to_numpy(),
         spindle_group=assignments["spindle_group"].to_numpy(),
-        uncertain=assignments["uncertain_assignment"].to_numpy(),
-        gmm_scale=fit_result.scale, gmm_model=fit_result.model,
-        centers_original_scale=fit_result.centers_original_scale,
-        low_label=LOW_LABEL, high_label=HIGH_LABEL,
-        output_png=outputs["distribution_png"],
+        low_threshold_original_scale=cutoff.low_threshold_original_scale,
+        high_threshold_original_scale=cutoff.high_threshold_original_scale,
+        low_label=LOW_LABEL, high_label=HIGH_LABEL, mid_label=MID_LABEL,
+        output_png=outputs["distribution_png"], rate_unit=args.rate_unit,
     )
     logger.info("saved %s", outputs["distribution_png"])
 
     # --- Step 5: compare N2-C3 infraslow summary parameters -------------------
     compare_df = validated.merge(
-        assignments[["subject_id", "spindle_group", "group_probability", "uncertain_assignment"]],
-        on="subject_id", how="inner",
+        assignments[["subject_id", "spindle_group"]], on="subject_id", how="inner",
     )
     comparison = compare_parameters(
         compare_df, "spindle_group", COMPARISON_PARAMETERS, fdr_alpha=args.fdr_alpha,
@@ -687,18 +792,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     comparison.to_csv(outputs["comparison"], index=False)
     logger.info("saved %s", outputs["comparison"])
 
-    # --- Step 6: reproduce the comparison plot + group figures ----------------
+    # --- Step 6: reproduce the comparison plot + group figures ("after" grouping) --
     low_df = compare_df[compare_df["spindle_group"] == LOW_LABEL]
     high_df = compare_df[compare_df["spindle_group"] == HIGH_LABEL]
-    infraslow_band = demo.INFRASLOW_BAND
 
-    low_plot = _build_group_plot_data(low_df, infraslow_band)
-    high_plot = _build_group_plot_data(high_df, infraslow_band)
+    low_plot = _build_group_plot_data(low_df, infraslow_band, rate_unit=args.rate_unit)
+    high_plot = _build_group_plot_data(high_df, infraslow_band, rate_unit=args.rate_unit)
 
     plot_group_infraslow_compare(
         low=low_plot, high=high_plot, infraslow_band=infraslow_band,
         sleep_stage=args.sleep_stage, channel=args.channel,
         output_png=outputs["compare_png"], output_pdf=outputs["compare_pdf"],
+        rate_unit=args.rate_unit,
     )
     plot_group_spectrum_clean(
         low=low_plot, high=high_plot, infraslow_band=infraslow_band,

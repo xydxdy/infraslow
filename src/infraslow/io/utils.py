@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+# Opening/decoding a .npz (or reading any per-subject file) is dominated by
+# Lustre I/O latency, not CPU, and a blocking read releases the GIL, so more
+# threads than cores still overlaps more latency -- matters once a caller is
+# loading a whole cohort (potentially 70k+ subject files).
+N_IO_WORKERS = min(32, len(os.sched_getaffinity(0)) * 4)
+
 
 def list_dir_filenames(directory: Path) -> set:
     """Return the set of entry names directly under ``directory`` (one readdir).
@@ -59,4 +65,4 @@ def progress_iter(
     yield from tqdm(items, total=total, desc=desc, unit="subj")
 
 
-__all__ = ["list_dir_filenames", "progress_iter"]
+__all__ = ["N_IO_WORKERS", "list_dir_filenames", "progress_iter"]

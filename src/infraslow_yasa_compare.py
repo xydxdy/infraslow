@@ -37,9 +37,11 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 
-from infraslow.processing.subject_pipeline import INFRASLOW_BAND, BASELINE_BAND
+from infraslow.io.utils import N_IO_WORKERS
+from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs
+from infraslow.processing.spindle import spindle_rate_per_min
+from infraslow.processing.subject_pipeline import INFRASLOW_BAND
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,6 @@ CHANNELS = ['F3', 'F4', 'C3', 'C4', 'O1', 'O2']
 STAGES = ['N1', 'N2', 'N3', 'NREM']
 STAGE_COLORS = {'N1': '#ff7f0e', 'N2': '#5b2a86', 'N3': '#1f77b4', 'NREM': '#2ca02c'}
 SUBJ_COLOR = '0.6'
-_trapz = getattr(np, 'trapezoid', np.trapz)   # NumPy 2.0 renamed trapz
 
 # UI styling (scaled down from plot_infraslow.ipynb's for this notebook's denser 2x3 grid)
 TITLE_FONTSIZE = 11
@@ -58,11 +59,6 @@ LEGEND_FONTSIZE = 7
 ANNOTATION_FONTSIZE = 7
 SUPTITLE_FONTSIZE = 15
 
-# Opening/decoding a .npz is dominated by Lustre I/O latency, not CPU, and a
-# blocking read releases the GIL, so more threads than cores still overlaps more
-# latency (see plot_infraslow.ipynb) -- matters once N_SUBJECTS is None and a
-# stage has 70k+ subject files.
-N_IO_WORKERS = min(32, len(os.sched_getaffinity(0)) * 4)
 LOG_EVERY = 1000   # log a progress line every this many npz files loaded, per stage
 
 
@@ -100,26 +96,6 @@ def parse_args():
     return p.parse_args()
 
 
-def _spindle_rate_per_min(npz, ch):
-    """Spindles/min for ONE subject/channel: total `{ch}__bouts__n_spindles` over
-    total bout duration (`{ch}__bouts__stop` - `{ch}__bouts__start`, seconds), or NaN
-    if there are no bouts for this channel. This collapses all of a subject's bouts
-    into a single per-subject rate -- callers must average these per-subject rates
-    across subjects (not pool raw per-bout counts across subjects), otherwise
-    subjects with more/longer bouts would be over-weighted relative to subjects with
-    fewer bouts."""
-    nkey, skey, ekey = f'{ch}__bouts__n_spindles', f'{ch}__bouts__start', f'{ch}__bouts__stop'
-    if nkey not in npz.files or skey not in npz.files or ekey not in npz.files:
-        return np.nan
-    n_spindles, start, stop = npz[nkey], npz[skey], npz[ekey]
-    if n_spindles.size == 0:
-        return np.nan
-    total_sec = float((stop - start).sum())
-    if total_sec <= 0:
-        return np.nan
-    return float(n_spindles.sum()) / (total_sec / 60.0)
-
-
 def load_subject_spectra(npz_path, channels):
     """{channel: (freqs, corr_mean, spindle_rate_per_min)} for channels with a
     non-empty spectrum in this npz."""
@@ -132,7 +108,8 @@ def load_subject_spectra(npz_path, channels):
             freqs = npz[fkey]
             if freqs.size == 0:
                 continue
-            out[ch] = (freqs, npz[ckey], _spindle_rate_per_min(npz, ch))
+            rate, _sem = spindle_rate_per_min(npz, ch)
+            out[ch] = (freqs, npz[ckey], rate)
     return out
 
 
@@ -175,73 +152,6 @@ def load_stage_cohort(stage, channels, n_subjects, results_dir):
     return by_channel
 
 
-def bigaussian(f, amp, mu, sd_l, sd_r):
-    """Two Gaussian halves sharing one peak but independent left/right widths --
-    captures the asymmetric shape (steep rise, slow decay) real infraslow spectra
-    show, which a symmetric Gaussian would pull away from the true peak to compromise on."""
-    sd = np.where(f < mu, sd_l, sd_r)
-    return amp * np.exp(-0.5 * ((f - mu) / sd) ** 2)
-
-
-def fit_isfs(freqs, corrected, infraslow_band=INFRASLOW_BAND, baseline_band=BASELINE_BAND):
-    """Bi-Gaussian ISFS fit (peak, bandwidth, AUC, detection) with `mu` fixed at the
-    empirical argmax -- see plot_infraslow.ipynb's fit_isfs for why (too few points
-    in the fit window to also let a 4th free parameter float)."""
-    base_m = (freqs >= baseline_band[0]) & (freqs <= baseline_band[1])
-    fit_m = (freqs >= infraslow_band[0]) & (freqs < baseline_band[0])
-    ff, yy = freqs[fit_m], corrected[fit_m]
-    mu = float(ff[np.argmax(yy)])
-
-    def _bigaussian_fixed_mu(f, amp, sd_l, sd_r):
-        return bigaussian(f, amp, mu, sd_l, sd_r)
-
-    p0 = [max(yy.max(), 1e-9), 0.01, 0.01]
-    (amp, sd_l, sd_r), _ = curve_fit(_bigaussian_fixed_mu, ff, yy, p0=p0,
-                                     bounds=([0, 1e-3, 1e-3], [np.inf, 0.05, 0.05]),
-                                     maxfev=10000)
-    popt = (amp, mu, sd_l, sd_r)
-    lo, hi = mu - sd_l, mu + sd_r
-    bandwidth = hi - lo
-    f_auc = np.linspace(lo, hi, 400)
-    auc = float(_trapz(bigaussian(f_auc, *popt), f_auc))
-    threshold = 1.5 * corrected[base_m].std()
-    return dict(popt=popt, amp=amp, mu=mu, sd_l=sd_l, sd_r=sd_r, lo=lo, hi=hi,
-                bandwidth=bandwidth, auc=auc, threshold=threshold,
-                detected=bool(amp > threshold))
-
-
-def _threshold_crossing(curve_freqs, curve, start_idx, threshold=0.0):
-    """First frequency, at or after `start_idx`, where `curve` drops from >=
-    `threshold` to < `threshold`, linearly interpolated between the two
-    bracketing samples (see plot_infraslow.ipynb)."""
-    seg = curve[start_idx:]
-    crossings = np.flatnonzero((seg[:-1] >= threshold) & (seg[1:] < threshold))
-    if crossings.size == 0:
-        return float(curve_freqs[-1])
-    i = start_idx + int(crossings[0])
-    f_a, f_b = curve_freqs[i], curve_freqs[i + 1]
-    y_a, y_b = curve[i], curve[i + 1]
-    return float(f_a + (threshold - y_a) * (f_b - f_a) / (y_b - y_a))
-
-
-def chromatogram_peak_area(curve_freqs, curve, threshold=0.0, infraslow_band=INFRASLOW_BAND):
-    """Chromatogram-style peak area: `curve` integrated above a sloped baseline
-    from (infraslow_band[0], curve there) down to where `curve` drops to
-    `threshold` (see plot_infraslow.ipynb)."""
-    x0 = infraslow_band[0]
-    y0 = float(np.interp(x0, curve_freqs, curve))
-    peak_idx = int(np.argmax(curve))
-    x1 = _threshold_crossing(curve_freqs, curve, peak_idx, threshold)
-
-    peak_m = (curve_freqs >= x0) & (curve_freqs <= x1)
-    xf, yf = curve_freqs[peak_m], curve[peak_m]
-    incline = threshold + (y0 - threshold) * (x1 - xf) / (x1 - x0)
-    above = np.clip(yf - incline, 0, None)
-    area = float(_trapz(above, xf))
-    return dict(area=area, freqs=xf, curve=yf, incline=incline, x0=x0, y0=y0, x1=x1,
-                threshold=threshold)
-
-
 def plot_channel_subplot(ax, freqs, subj_corr, title, *, color, spindle_rates=None, show_individual=False, show_legend=False):
     """Subject lines behind, average +/- SEM on top, plus a bi-Gaussian ISFS fit
     (on the average curve) with its peak/bandwidth/AUC annotated. Returns
@@ -272,7 +182,7 @@ def plot_channel_subplot(ax, freqs, subj_corr, title, *, color, spindle_rates=No
             label=f'Average (n={n})')
 
     # `spindle_rates` already holds ONE rate per subject (bouts averaged within that
-    # subject by `_spindle_rate_per_min`) -- averaging those per-subject rates here
+    # subject by `spindle_rate_per_min`) -- averaging those per-subject rates here
     # (rather than pooling raw per-bout spindle counts across subjects) keeps every
     # subject weighted equally regardless of how many bouts it contributed.
     spindle_vals = np.array(list(spindle_rates.values()), dtype=float) if spindle_rates else np.array([])

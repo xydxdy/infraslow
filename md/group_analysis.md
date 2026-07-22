@@ -286,44 +286,24 @@ low_spindle_rate
 high_spindle_rate
 ```
 
-Use a two-component Gaussian Mixture Model as the primary grouping method.
+Use a `log1p` mean ± std cutoff as the primary grouping method.
 
-### GMM Requirements
+### Cutoff Requirements
 
 * Use one valid N2–C3 `spindle_per_min` value per subject.
-* Use a fixed random seed.
-* Evaluate:
+* Take `log1p(spindle_per_min)` for every valid subject.
+* Compute that log1p-scale distribution's mean and (sample) standard deviation.
+* Classify each subject by fixed thresholds on the log1p scale:
 
-  * Raw `spindle_per_min`
-  * `log1p(spindle_per_min)`
-* Fit a two-component GMM for each representation.
-* Compare the models using BIC.
-* Select the representation with the lower BIC.
-* Order the final labels using the component centers on the original spindle-rate scale.
+  * `low_spindle_rate` when `log1p(spindle_per_min) < mean - std`
+  * `high_spindle_rate` when `log1p(spindle_per_min) > mean + std`
+  * `mid_spindle_rate` otherwise (the middle band)
 
-The component with the lower spindle-rate center must be:
+The method is deterministic (no random seed, no model fit) -- the same input always
+produces the same cutoff and the same group assignments.
 
-```text
-low_spindle_rate
-```
-
-The component with the higher spindle-rate center must be:
-
-```text
-high_spindle_rate
-```
-
-Save posterior group-assignment probabilities.
-
-Mark a subject as uncertain when:
-
-```text
-group_probability < 0.70
-```
-
-Make the threshold configurable.
-
-Do not exclude uncertain subjects from the primary analysis.
+Do not exclude `mid_spindle_rate` subjects from the dataset; only exclude them from the
+low-vs-high comparison (Step 5), since they belong to neither group.
 
 Save:
 
@@ -340,11 +320,6 @@ channel
 spindle_per_min
 spindle_per_min_SEM
 spindle_group
-group_probability
-uncertain_assignment
-gmm_input_scale
-raw_scale_bic
-log1p_scale_bic
 ```
 
 ### Spindle-Rate Distribution Plot
@@ -357,13 +332,9 @@ N2_C3_spindle_rate_group_distribution.png
 
 The figure should show:
 
-* Distribution of N2–C3 `spindle_per_min`.
-* Two fitted GMM components.
-* Group centers.
-* Group membership.
-* Estimated decision boundary.
+* Distribution of N2–C3 `spindle_per_min`, split by group (low/mid/high).
+* The low and high cutoff thresholds (mapped back to the original spindle-rate scale).
 * Number of subjects in each group.
-* Number of uncertain assignments.
 
 Because the groups are constructed from `spindle_per_min`, do not use a statistical difference in `spindle_per_min` as independent evidence supporting the groups.
 

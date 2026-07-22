@@ -1,12 +1,16 @@
-"""Two-component GMM assignment of subjects into low/high spindle-rate groups.
+"""Log1p mean +/- std cutoff assignment of subjects into low/high spindle-rate groups.
 
-Implements md/group_analysis.md Step 4: fit a 2-component Gaussian mixture on
-one valid N2-C3 ``spindle_per_min`` value per subject, once on the raw scale and
-once on ``log1p(spindle_per_min)``, keep whichever representation has the lower
-BIC, then order the two components by their center on the *original*
-spindle-rate scale so the lower-center component is always
-``low_spindle_rate`` and the higher-center component is always
-``high_spindle_rate``.
+Implements md/group_analysis.md Step 4: take ``log1p`` of every valid
+subject's N2-C3 spindle rate, compute that log1p-scale distribution's mean
+and (sample) standard deviation, then split subjects by two fixed cutoffs::
+
+    low_spindle_rate  : log1p(rate) <  mean - std
+    high_spindle_rate : log1p(rate) >  mean + std
+    mid_spindle_rate  : mean - std <= log1p(rate) <= mean + std
+
+The middle band is returned (never dropped) but is excluded from the
+low-vs-high comparison downstream, by construction: callers keep only
+``spindle_group in {low_spindle_rate, high_spindle_rate}`` rows.
 """
 
 from __future__ import annotations
@@ -17,95 +21,34 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.mixture import GaussianMixture
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "LOW_LABEL",
     "HIGH_LABEL",
-    "RANDOM_STATE_DEFAULT",
-    "GMMFitResult",
-    "fit_two_component_gmm",
+    "MID_LABEL",
+    "MIN_SUBJECTS_FOR_CUTOFF",
+    "CutoffResult",
     "assign_spindle_rate_groups",
 ]
 
-RANDOM_STATE_DEFAULT = 42
 LOW_LABEL = "low_spindle_rate"
 HIGH_LABEL = "high_spindle_rate"
-#: sklearn GaussianMixture restarts per representation, for a stable fit given
-#: n_init random initialisations under one fixed random_state.
-N_INIT = 10
-MIN_SUBJECTS_FOR_GMM = 4
+MID_LABEL = "mid_spindle_rate"
+MIN_SUBJECTS_FOR_CUTOFF = 2
 
 
 @dataclass
-class GMMFitResult:
-    """The selected 2-component GMM fit, plus both candidate representations' BIC."""
+class CutoffResult:
+    """The log1p-scale mean/std and the low/high cutoff thresholds actually used."""
 
-    scale: str  # "raw" or "log1p" -- the representation actually used
-    bic_raw: float
-    bic_log1p: float
-    model: GaussianMixture
-    labels: np.ndarray  # raw (unordered) component index per subject, fit-scale order
-    probs: np.ndarray  # (n, 2) posterior probabilities, columns in raw component order
-    centers_original_scale: np.ndarray  # each raw component's center, mapped back to spindles/min
-
-
-def _fit_gmm(values_2d: np.ndarray, *, random_state: int) -> GaussianMixture:
-    gmm = GaussianMixture(n_components=2, random_state=random_state, n_init=N_INIT)
-    gmm.fit(values_2d)
-    return gmm
-
-
-def fit_two_component_gmm(
-    spindle_per_min: np.ndarray, *, random_state: int = RANDOM_STATE_DEFAULT
-) -> GMMFitResult:
-    """Fit raw- and log1p-scale 2-component GMMs and return the lower-BIC one.
-
-    Args:
-        spindle_per_min: One valid (finite, non-negative), already-filtered
-            N2-C3 ``spindle_per_min`` value per subject.
-        random_state: Fixed seed for both candidate fits (reproducible groups).
-
-    Returns:
-        The selected :class:`GMMFitResult`; ``centers_original_scale`` maps
-        component centers back to spindles/min even when ``scale == "log1p"``
-        (via ``expm1``), so callers can always order groups on the natural scale.
-
-    Raises:
-        ValueError: if fewer than :data:`MIN_SUBJECTS_FOR_GMM` values are given.
-    """
-    values = np.asarray(spindle_per_min, dtype=float)
-    if values.ndim != 1 or values.size < MIN_SUBJECTS_FOR_GMM:
-        raise ValueError(
-            f"Need at least {MIN_SUBJECTS_FOR_GMM} subjects with a valid "
-            f"spindle_per_min value to fit a GMM (got {values.size})."
-        )
-
-    raw = values.reshape(-1, 1)
-    log1p = np.log1p(values).reshape(-1, 1)
-
-    gmm_raw = _fit_gmm(raw, random_state=random_state)
-    gmm_log1p = _fit_gmm(log1p, random_state=random_state)
-    bic_raw = float(gmm_raw.bic(raw))
-    bic_log1p = float(gmm_log1p.bic(log1p))
-    logger.info("GMM BIC: raw-scale=%.2f log1p-scale=%.2f", bic_raw, bic_log1p)
-
-    if bic_raw <= bic_log1p:
-        scale, gmm, fit_values = "raw", gmm_raw, raw
-        centers = gmm.means_.ravel()
-    else:
-        scale, gmm, fit_values = "log1p", gmm_log1p, log1p
-        centers = np.expm1(gmm.means_.ravel())
-    logger.info("GMM representation selected: %s-scale", scale)
-
-    labels = gmm.predict(fit_values)
-    probs = gmm.predict_proba(fit_values)
-    return GMMFitResult(
-        scale=scale, bic_raw=bic_raw, bic_log1p=bic_log1p, model=gmm,
-        labels=labels, probs=probs, centers_original_scale=centers,
-    )
+    log_mean: float
+    log_std: float
+    low_threshold: float  # log1p scale: mean - std
+    high_threshold: float  # log1p scale: mean + std
+    low_threshold_original_scale: float  # expm1(low_threshold), i.e. spindle-rate units
+    high_threshold_original_scale: float  # expm1(high_threshold)
 
 
 def assign_spindle_rate_groups(
@@ -113,29 +56,31 @@ def assign_spindle_rate_groups(
     spindle_per_min: pd.Series,
     spindle_per_min_sem: pd.Series,
     *,
-    random_state: int = RANDOM_STATE_DEFAULT,
-    probability_threshold: float = 0.70,
-) -> Tuple[pd.DataFrame, GMMFitResult]:
-    """One row per subject with a valid ``spindle_per_min``: group + posterior probability.
+    rate_col: str = "spindle_per_min",
+    rate_sem_col: str = "spindle_per_min_SEM",
+) -> Tuple[pd.DataFrame, CutoffResult]:
+    """One row per subject with a valid spindle rate: group by a log1p mean +/- std cutoff.
 
     Args:
         subject_ids, spindle_per_min, spindle_per_min_sem: Aligned per-subject
             Series (same length/order); callers should already have filtered
-            to validated N2-C3 subjects.
-        random_state: Fixed seed, forwarded to :func:`fit_two_component_gmm`.
-        probability_threshold: A subject's ``uncertain_assignment`` is ``True``
-            when its posterior ``group_probability`` (max of the two component
-            probabilities) falls below this. Uncertain subjects are still
-            returned/labeled -- callers must not drop them from downstream
-            analysis (md/group_analysis.md Step 4).
+            to validated N2-C3 subjects. Unit-agnostic -- these may be
+            expressed in spindles/min, spindles/hr, etc.
+        rate_col, rate_sem_col: Column names for the rate/SEM in the returned
+            ``assignments`` (defaults match ``spindle_per_min``'s native unit;
+            pass e.g. ``"spindle_per_hr"``/``"spindle_per_hr_SEM"`` when the
+            input Series are in spindles/hr instead).
 
     Returns:
-        ``(assignments, fit_result)`` where ``assignments`` has columns
-        ``subject_id, spindle_per_min, spindle_per_min_SEM, spindle_group,
-        group_probability, uncertain_assignment, gmm_input_scale,
-        raw_scale_bic, log1p_scale_bic`` -- one row per subject with a finite
-        ``spindle_per_min`` (non-finite subjects are the validation step's
-        responsibility, not this function's, and are simply not fit here).
+        ``(assignments, cutoff)`` where ``assignments`` has columns
+        ``subject_id, {rate_col}, {rate_sem_col}, spindle_group`` -- one row
+        per subject with a finite rate value (non-finite subjects are the
+        validation step's responsibility, not this function's, and are
+        simply excluded here). ``spindle_group`` is one of :data:`LOW_LABEL`,
+        :data:`HIGH_LABEL`, or :data:`MID_LABEL`.
+
+    Raises:
+        ValueError: if fewer than :data:`MIN_SUBJECTS_FOR_CUTOFF` valid values are given.
     """
     subject_ids = pd.Series(subject_ids).reset_index(drop=True)
     values = pd.Series(spindle_per_min).reset_index(drop=True).to_numpy(dtype=float)
@@ -145,31 +90,42 @@ def assign_spindle_rate_groups(
     n_excluded = int((~valid_mask).sum())
     if n_excluded:
         logger.warning(
-            "%d subject(s) excluded from GMM fitting (non-finite spindle_per_min); "
+            "%d subject(s) excluded from grouping (non-finite spindle rate); "
             "validation should already have flagged these", n_excluded,
         )
 
-    fit_result = fit_two_component_gmm(values[valid_mask], random_state=random_state)
+    valid_values = values[valid_mask]
+    if valid_values.size < MIN_SUBJECTS_FOR_CUTOFF:
+        raise ValueError(
+            f"Need at least {MIN_SUBJECTS_FOR_CUTOFF} subjects with a valid spindle "
+            f"rate to compute a log1p mean/std cutoff (got {valid_values.size})."
+        )
 
-    # Order raw component indices by their original-scale center (ascending):
-    # `order[0]` is the low-rate component, `order[1]` the high-rate component.
-    order = np.argsort(fit_result.centers_original_scale)
-    remap = {int(order[0]): 0, int(order[1]): 1}
+    log_values = np.log1p(valid_values)
+    log_mean = float(log_values.mean())
+    log_std = float(log_values.std(ddof=1)) if log_values.size > 1 else 0.0
+    low_threshold = log_mean
+    high_threshold = log_mean
+    logger.info(
+        "log1p spindle-rate cutoff: mean=%.4f std=%.4f -> low<%.4f, high>%.4f (log1p scale)",
+        log_mean, log_std, low_threshold, high_threshold,
+    )
 
-    ordered_labels = np.array([remap[int(label)] for label in fit_result.labels])
-    ordered_probs = fit_result.probs[:, order]  # column 0 = P(low), column 1 = P(high)
-    group_probability = ordered_probs.max(axis=1)
-    spindle_group = np.where(ordered_labels == 0, LOW_LABEL, HIGH_LABEL)
+    spindle_group = np.full(log_values.shape, MID_LABEL, dtype=object)
+    spindle_group[log_values < low_threshold] = LOW_LABEL
+    spindle_group[log_values > high_threshold] = HIGH_LABEL
+
+    cutoff = CutoffResult(
+        log_mean=log_mean, log_std=log_std,
+        low_threshold=low_threshold, high_threshold=high_threshold,
+        low_threshold_original_scale=float(np.expm1(low_threshold)),
+        high_threshold_original_scale=float(np.expm1(high_threshold)),
+    )
 
     assignments = pd.DataFrame({
         "subject_id": subject_ids[valid_mask].to_numpy(),
-        "spindle_per_min": values[valid_mask],
-        "spindle_per_min_SEM": sems[valid_mask].to_numpy(),
+        rate_col: valid_values,
+        rate_sem_col: sems[valid_mask].to_numpy(),
         "spindle_group": spindle_group,
-        "group_probability": group_probability,
-        "uncertain_assignment": group_probability < probability_threshold,
-        "gmm_input_scale": fit_result.scale,
-        "raw_scale_bic": fit_result.bic_raw,
-        "log1p_scale_bic": fit_result.bic_log1p,
     })
-    return assignments, fit_result
+    return assignments, cutoff

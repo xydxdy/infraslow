@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import scipy.signal as signal
+from scipy.optimize import curve_fit
 
 from .signal import ButterFilter
 
@@ -41,6 +42,9 @@ DEFAULT_SF_ENV: float = 1.0
 # resolve the 0.01 Hz lower edge of DEFAULT_INFRASLOW_BAND (0.01 Hz resolution
 # at 100 s).
 DEFAULT_WINDOW_SEC: float = 100.0
+# Band (Hz) the bi-Gaussian ISFS fit (:func:`fit_isfs`) uses to estimate the
+# noise floor for its detection threshold and chromatogram baseline.
+DEFAULT_BASELINE_BAND: Tuple[float, float] = (0.06, 0.1)
 
 
 @dataclass
@@ -239,12 +243,83 @@ def infraslow_spectrum(
     )
 
 
+def bigaussian(f, amp, mu, sd_l, sd_r):
+    """Two Gaussian halves sharing one peak but independent left/right widths --
+    captures the asymmetric shape (steep rise, slow decay) real infraslow spectra
+    show, which a symmetric Gaussian would pull away from the true peak to compromise on."""
+    sd = np.where(f < mu, sd_l, sd_r)
+    return amp * np.exp(-0.5 * ((f - mu) / sd) ** 2)
+
+
+def fit_isfs(freqs, corrected, infraslow_band=DEFAULT_INFRASLOW_BAND, baseline_band=DEFAULT_BASELINE_BAND):
+    """Bi-Gaussian ISFS fit (peak, bandwidth, AUC, detection) with `mu` fixed at the
+    empirical argmax -- see plot_infraslow.ipynb's fit_isfs for why (too few points
+    in the fit window to also let a 4th free parameter float)."""
+    base_m = (freqs >= baseline_band[0]) & (freqs <= baseline_band[1])
+    fit_m = (freqs >= infraslow_band[0]) & (freqs < baseline_band[0])
+    ff, yy = freqs[fit_m], corrected[fit_m]
+    mu = float(ff[np.argmax(yy)])
+
+    def _bigaussian_fixed_mu(f, amp, sd_l, sd_r):
+        return bigaussian(f, amp, mu, sd_l, sd_r)
+
+    p0 = [max(yy.max(), 1e-9), 0.01, 0.01]
+    (amp, sd_l, sd_r), _ = curve_fit(_bigaussian_fixed_mu, ff, yy, p0=p0,
+                                     bounds=([0, 1e-3, 1e-3], [np.inf, 0.05, 0.05]),
+                                     maxfev=10000)
+    popt = (amp, mu, sd_l, sd_r)
+    lo, hi = mu - sd_l, mu + sd_r
+    bandwidth = hi - lo
+    f_auc = np.linspace(lo, hi, 400)
+    auc = float(_trapz(bigaussian(f_auc, *popt), f_auc))
+    threshold = 1.5 * corrected[base_m].std()
+    return dict(popt=popt, amp=amp, mu=mu, sd_l=sd_l, sd_r=sd_r, lo=lo, hi=hi,
+                bandwidth=bandwidth, auc=auc, threshold=threshold,
+                detected=bool(amp > threshold))
+
+
+def _threshold_crossing(curve_freqs, curve, start_idx, threshold=0.0):
+    """First frequency, at or after `start_idx`, where `curve` drops from >=
+    `threshold` to < `threshold`, linearly interpolated between the two
+    bracketing samples (see plot_infraslow.ipynb)."""
+    seg = curve[start_idx:]
+    crossings = np.flatnonzero((seg[:-1] >= threshold) & (seg[1:] < threshold))
+    if crossings.size == 0:
+        return float(curve_freqs[-1])
+    i = start_idx + int(crossings[0])
+    f_a, f_b = curve_freqs[i], curve_freqs[i + 1]
+    y_a, y_b = curve[i], curve[i + 1]
+    return float(f_a + (threshold - y_a) * (f_b - f_a) / (y_b - y_a))
+
+
+def chromatogram_peak_area(curve_freqs, curve, threshold=0.0, infraslow_band=DEFAULT_INFRASLOW_BAND):
+    """Chromatogram-style peak area: `curve` integrated above a sloped baseline
+    from (infraslow_band[0], curve there) down to where `curve` drops to
+    `threshold` (see plot_infraslow.ipynb)."""
+    x0 = infraslow_band[0]
+    y0 = float(np.interp(x0, curve_freqs, curve))
+    peak_idx = int(np.argmax(curve))
+    x1 = _threshold_crossing(curve_freqs, curve, peak_idx, threshold)
+
+    peak_m = (curve_freqs >= x0) & (curve_freqs <= x1)
+    xf, yf = curve_freqs[peak_m], curve[peak_m]
+    incline = threshold + (y0 - threshold) * (x1 - xf) / (x1 - x0)
+    above = np.clip(yf - incline, 0, None)
+    area = float(_trapz(above, xf))
+    return dict(area=area, freqs=xf, curve=yf, incline=incline, x0=x0, y0=y0, x1=x1,
+                threshold=threshold)
+
+
 __all__ = [
     "InfraslowSpectrum",
     "DEFAULT_SIGMA_BAND",
     "DEFAULT_INFRASLOW_BAND",
     "DEFAULT_SF_ENV",
     "DEFAULT_WINDOW_SEC",
+    "DEFAULT_BASELINE_BAND",
     "power_envelope",
     "infraslow_spectrum",
+    "bigaussian",
+    "fit_isfs",
+    "chromatogram_peak_area",
 ]
