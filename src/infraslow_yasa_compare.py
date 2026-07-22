@@ -1,4 +1,4 @@
-"""Infraslow oscillation — relative spectral power across channels and stages (results_v3).
+"""Infraslow oscillation — relative spectral power across channels and stages (data).
 
 Converted from demo_infraslow_yasa_compare.ipynb. Reads the pipeline's own
 bout-averaged, baseline-corrected infraslow spectrum (`{channel}__spectra__corr_mean`
@@ -91,7 +91,7 @@ def parse_args():
                          'omit/None = every subject npz found (env: N_SUBJECTS)')
     p.add_argument('--results-dir', type=Path,
                     default=Path(os.path.expandvars(
-                        os.environ.get('RESULTS_DIR', '$SCRATCH/results_v3/npz'))),
+                        os.environ.get('RESULTS_DIR', '$SCRATCH/data/npz'))),
                     help='Directory containing {stage}/{subject}.npz files (env: RESULTS_DIR)')
     p.add_argument('--output-dir', type=Path,
                     default=Path(os.path.expandvars(

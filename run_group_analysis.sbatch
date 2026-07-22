@@ -41,7 +41,7 @@ mkdir -p /scratch/users/chaisaen/logs
 STAGE="${STAGE:-N2}"                       # sleep stage: N1 | N2 | N3 | NREM
 CHANNEL="${CHANNEL:-C3}"                   # EEG channel: F3 | F4 | C3 | C4 | O1 | O2
 N_SUBJECTS="${N_SUBJECTS:-none}"           # none = every subject npz found for STAGE
-RESULTS_DIR="${RESULTS_DIR:-$SCRATCH/results_v3/npz}"
+RESULTS_DIR="${RESULTS_DIR:-$SCRATCH/data/npz}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/infraslow_outputs/group_analysis/${STAGE}_${CHANNEL}}"
 GROUP_PROBABILITY_THRESHOLD="${GROUP_PROBABILITY_THRESHOLD:-0.70}"
 FDR_ALPHA="${FDR_ALPHA:-0.05}"

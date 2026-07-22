@@ -40,7 +40,7 @@ via Slurm's ``--cpus-per-task`` for it to matter.
 Run via Slurm, not the login node, e.g.::
 
     srun -p normal --time=00:30:00 --mem=32G --cpus-per-task=16 \\
-        python3 group_analysis.py --results $SCRATCH/results_v3/npz \\
+        python3 group_analysis.py --results $SCRATCH/data/npz \\
         --output-dir infraslow/results/group_analysis/N2_C3
 """
 

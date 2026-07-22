@@ -9,7 +9,7 @@
 #SBATCH --mem=32G
 
 # Runs demo_infraslow_yasa_compare.py (by default reads EVERY subject npz per
-# stage from $SCRATCH/results_v3/npz/{STAGE} -- ~77k+ files/stage as of writing,
+# stage from $SCRATCH/data/npz/{STAGE} -- ~77k+ files/stage as of writing,
 # loaded via a thread pool since it's I/O-bound), saving one PNG per stage plus
 # summary.csv and a progress.log to $SCRATCH/infraslow_outputs/infraslow/.
 #
@@ -31,7 +31,7 @@ mkdir -p /scratch/users/chaisaen/logs
 # --- Parameters (edit values here) ---
 SHOW_INDIVIDUAL=true
 N_SUBJECTS=none                        # none = every subject npz found for a stage
-RESULTS_DIR=$SCRATCH/results_v3/npz
+RESULTS_DIR=$SCRATCH/data/npz
 OUTPUT_DIR=$SCRATCH/infraslow_outputs/infraslow-show_individual
 
 # Initialize conda for non-interactive Slurm shell
@@ -44,4 +44,4 @@ ARGS=(--results-dir "$RESULTS_DIR" --output-dir "$OUTPUT_DIR")
 [[ "$N_SUBJECTS" != "none" ]] && ARGS+=(--n-subjects "$N_SUBJECTS")
 [[ "$SHOW_INDIVIDUAL" == "true" ]] && ARGS+=(--show-individual)
 
-python3 demo_infraslow_yasa_compare.py "${ARGS[@]}"
+python3 infraslow_yasa_compare.py.py "${ARGS[@]}"

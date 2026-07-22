@@ -120,9 +120,9 @@ DEFAULT_METADATA = "$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv"
 DEFAULT_METADATA2 = "$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv"
 DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
 DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
-DEFAULT_OUTPUT = "$SCRATCH/results_v2/metadata.csv"
-DEFAULT_ERROR_OUTPUT = "$SCRATCH/results_v2/errors.csv"
-DEFAULT_NPZ_DIR = "$SCRATCH/results_v2/npz"
+DEFAULT_OUTPUT = "$SCRATCH/data/metadata.csv"
+DEFAULT_ERROR_OUTPUT = "$SCRATCH/data/errors.csv"
+DEFAULT_NPZ_DIR = "$SCRATCH/data/npz"
 EDF_SUFFIX = ".edf"
 HYPNO_SUFFIX = DEFAULT_HYPNODENSITY_SUFFIX  # "_Hypnodensity.csv"
 
@@ -453,7 +453,7 @@ def load_channel_events(npz_path: Path, channel: str) -> Dict[str, np.ndarray]:
     Example::
 
         from pathlib import Path
-        path = Path("$SCRATCH/results_v2/npz/N2/12345.npz")
+        path = Path("$SCRATCH/data/npz/N2/12345.npz")
         events = load_channel_events(path, "F3")
         print(events["freqs"].shape, events["corr_mean"].shape)
         print(events["bout_start"].shape, events["spindle_peak"].shape)
@@ -680,7 +680,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     error_path = _expand(args.error_output)
     npz_dir = _expand(args.npz_dir)
 
-    # Requirement: create results_v2/ (+ per-stage npz/ subdirs) and logs/ up front.
+    # Requirement: create data/ (+ per-stage npz/ subdirs) and logs/ up front.
     output_path.parent.mkdir(parents=True, exist_ok=True)
     error_path.parent.mkdir(parents=True, exist_ok=True)
     for stage in NPZ_STAGES:
