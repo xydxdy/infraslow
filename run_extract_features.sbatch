@@ -14,17 +14,17 @@
 #   1. Uniform array on one partition -- add --array at submit time and leave
 #      NUM_SHARDS/SHARD_INDEX unset; they default from Slurm's own
 #      $SLURM_ARRAY_TASK_COUNT/_ID:
-#        sbatch --array=0-9 run_all_metrics.sbatch          # 10 shards, mignot
+#        sbatch --array=0-9 extract_features.sbatch          # 10 shards, mignot
 #
 #   2. Mixed partitions/resources (e.g. 1 job on mignot + 2 on normal) -- submit
 #      each shard as its own job, no --array, with NUM_SHARDS/SHARD_INDEX passed
 #      explicitly (they take priority over any Slurm array vars):
 #        sbatch --partition=mignot --cpus-per-task=10 --mem=30G \
-#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=0 run_all_metrics.sbatch
+#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=0 extract_features.sbatch
 #        sbatch --partition=normal --cpus-per-task=10 --mem=30G --time=2-00:00:00 \
-#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=1 run_all_metrics.sbatch
+#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=1 extract_features.sbatch
 #        sbatch --partition=normal --cpus-per-task=10 --mem=30G --time=2-00:00:00 \
-#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=2 run_all_metrics.sbatch
+#          --export=ALL,NUM_SHARDS=3,SHARD_INDEX=2 extract_features.sbatch
 #      (normal's ceiling is 2 days -- override --time or add --qos=long for
 #      longer, since the 72:00:00 default above exceeds it.)
 #
@@ -63,7 +63,7 @@ export OUTPUT="${OUTPUT_ROOT}/metadata_shard${SHARD_INDEX}.csv"
 export ERROR_OUTPUT="${OUTPUT_ROOT}/errors_shard${SHARD_INDEX}.csv"
 export NPZ_DIR="${OUTPUT_ROOT}/npz"
 
-python -u src/run_all_metrics.py \
+python -u src/extract_features.py \
     --workers "${SLURM_CPUS_PER_TASK}" \
     --num-shards "${NUM_SHARDS}" \
     --shard-index "${SHARD_INDEX}" \
