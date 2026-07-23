@@ -172,7 +172,9 @@ def process_subject(task: Task) -> Outcome:
             metadata_row, Path(edf_path), Path(hypno_path), issues_out=raw_issues, **params
         )
         try:
-            write_subject_channel_events(Path(npz_dir), subject_id, events)
+            write_subject_channel_events(
+                Path(npz_dir), subject_id, events, stages=params.get("stages", NPZ_STAGES)
+            )
         except Exception as exc:  # noqa: BLE001 - an npz-write failure must not lose the row
             logger.warning("Could not write npz for %s: %s", subject_id, exc)
             raw_issues.append({
@@ -511,6 +513,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Process only this one subject ID (a one-subject dry run); overrides --limit.",
     )
     parser.add_argument(
+        "--stages", nargs="+", choices=list(NPZ_STAGES), default=None,
+        help="Stage group(s) to compute/write, e.g. --stages N2 NREM. Defaults to all of "
+             f"{', '.join(NPZ_STAGES)}. Only the requested stages' npz files are written or "
+             "checked on resume -- the others are left untouched.",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Process at most this many valid subjects (for quick tests).",
     )
@@ -687,11 +695,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     output_path = _expand(args.output)
     error_path = _expand(args.error_output)
     npz_dir = _expand(args.npz_dir)
+    # Restrict to the requested stage group(s) (default: all of NPZ_STAGES),
+    # preserving canonical order -- only these stages' npz files are written,
+    # checked on resume, or validated by --validate-only.
+    stages: Tuple[str, ...] = (
+        tuple(s for s in NPZ_STAGES if s in set(args.stages)) if args.stages else NPZ_STAGES
+    )
 
     # Requirement: create data/ (+ per-stage npz/ subdirs) and logs/ up front.
     output_path.parent.mkdir(parents=True, exist_ok=True)
     error_path.parent.mkdir(parents=True, exist_ok=True)
-    for stage in NPZ_STAGES:
+    for stage in stages:
         (npz_dir / stage).mkdir(parents=True, exist_ok=True)
     Path("logs").mkdir(parents=True, exist_ok=True)
 
@@ -705,7 +719,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("error output   : %s", error_path)
     logger.info("npz dir        : %s", npz_dir)
     logger.info("channels       : %s", ", ".join(CHANNELS))
-    logger.info("npz stages     : %s", ", ".join(NPZ_STAGES))
+    logger.info("npz stages     : %s", ", ".join(stages))
 
     # --- 0. --validate-only: check existing outputs and exit, no processing --
     if args.validate_only:
@@ -713,7 +727,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("--validate-only: %s does not exist", output_path)
             return 1
         prior_df = pd.read_csv(output_path, dtype={"ID": str})
-        valid_ids = validated_done_ids(prior_df, npz_dir)
+        valid_ids = validated_done_ids(prior_df, npz_dir, stages=stages)
         print("=" * 60)
         print(f"Validated {len(prior_df)} subject(s) listed in {output_path}")
         print(f"  valid npz outputs   : {len(valid_ids)}")
@@ -766,7 +780,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if output_path.exists() and not args.overwrite:
         try:
             prior_df = pd.read_csv(output_path, dtype={"ID": str})
-            done_ids = validated_done_ids(prior_df, npz_dir)
+            done_ids = validated_done_ids(prior_df, npz_dir, stages=stages)
             # A subject being rebuilt (invalid/missing npz) must not keep its stale
             # row too, or it would be duplicated once its fresh row is appended.
             prior_df = prior_df[prior_df["ID"].astype(str).isin(done_ids)].reset_index(drop=True)
@@ -778,7 +792,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("--overwrite set: existing %s will be replaced", output_path)
 
     # --- 3. Build the task list ------------------------------------------- #
-    params = {"sf": SF, "channels": CHANNELS, "stages": NPZ_STAGES, "require_spindle": True}
+    params = {"sf": SF, "channels": CHANNELS, "stages": stages, "require_spindle": True}
     tasks: List[Task] = []
     for _, row in valid.iterrows():
         subject_id = str(row["ID"]).strip()

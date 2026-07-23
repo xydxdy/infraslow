@@ -41,16 +41,19 @@ set -euo pipefail
 OUTPUT_ROOT="$SCRATCH/data"
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-1}}"
 SHARD_INDEX="${SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-0}}"
+# Stage group(s) to compute/write (see extract_features.py --stages); only
+# these stages' npz files are touched. Override with --export=ALL,STAGES="N2 NREM".
+STAGES="${STAGES:-N2}"
 
 mkdir -p logs
-mkdir -p "${OUTPUT_ROOT}/npz/N1"
-mkdir -p "${OUTPUT_ROOT}/npz/N2"
-mkdir -p "${OUTPUT_ROOT}/npz/N3"
-mkdir -p "${OUTPUT_ROOT}/npz/NREM"
 
 # Initialize conda for non-interactive Slurm shell
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate infraslow-py310
+
+for stage in ${STAGES}; do
+    mkdir -p "${OUTPUT_ROOT}/npz/${stage}"
+done
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -67,6 +70,7 @@ python -u src/extract_features.py \
     --workers "${SLURM_CPUS_PER_TASK}" \
     --num-shards "${NUM_SHARDS}" \
     --shard-index "${SHARD_INDEX}" \
+    --stages ${STAGES} \
     --metadata "${METADATA}" \
     --metadata2 "${METADATA2}" \
     --output "${OUTPUT}" \
