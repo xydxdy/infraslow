@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "pandas",
     "scipy",
+    "mne",
     "yasa",
     "seaborn",
     "lunapi==1.6.5",

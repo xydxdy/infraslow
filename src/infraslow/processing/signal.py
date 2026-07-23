@@ -4,6 +4,7 @@ import logging
 import types
 from typing import Any, Callable, List, Mapping, Optional, Sequence
 
+import mne
 import numpy as np
 import scipy.signal as signal
 

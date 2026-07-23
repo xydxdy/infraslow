@@ -377,7 +377,10 @@ def validate_subject_npz(
     * the file loads with ``np.load(path, allow_pickle=False)`` and every array
       is present under the expected ``{channel}__{category}__{field}`` keys;
     * no array has an ``object`` dtype;
-    * per channel: ``len(freqs) == len(corr_mean)``, both finite when non-empty;
+    * per channel: ``len(freqs) == len(raw_mean) == len(corr_mean)``, all finite
+      when non-empty (``raw_mean`` is the "real"/uncorrected spectrum, ``corr_mean``
+      the baseline-corrected one -- see :func:`~infraslow.processing.subject_pipeline.
+      calculate_stage_events`);
     * per channel: ``len(spindle_start) == len(spindle_stop) == len(spindle_peak)``,
       each spindle satisfies ``start <= peak <= stop``, all finite;
     * per channel: ``len(bout_start) == len(bout_stop) == len(bout_n_spindles)``,
@@ -411,9 +414,13 @@ def validate_subject_npz(
             if len(arr) < len(STAGE_EVENT_FIELDS):
                 continue  # already reported as missing above
 
-            if len(arr["freqs"]) != len(arr["corr_mean"]):
-                problems.append(f"{ch}: freqs/corr_mean length mismatch")
-            elif arr["freqs"].size and not (np.all(np.isfinite(arr["freqs"])) and np.all(np.isfinite(arr["corr_mean"]))):
+            if len(arr["freqs"]) != len(arr["corr_mean"]) or len(arr["freqs"]) != len(arr["raw_mean"]):
+                problems.append(f"{ch}: freqs/raw_mean/corr_mean length mismatch")
+            elif arr["freqs"].size and not (
+                np.all(np.isfinite(arr["freqs"]))
+                and np.all(np.isfinite(arr["raw_mean"]))
+                and np.all(np.isfinite(arr["corr_mean"]))
+            ):
                 problems.append(f"{ch}: non-finite spectrum values")
 
             n_sp = {len(arr["spindle_start"]), len(arr["spindle_stop"]), len(arr["spindle_peak"])}
@@ -455,12 +462,13 @@ def load_channel_events(npz_path: Path, channel: str) -> Dict[str, np.ndarray]:
         from pathlib import Path
         path = Path("$SCRATCH/data/npz/N2/12345.npz")
         events = load_channel_events(path, "F3")
-        print(events["freqs"].shape, events["corr_mean"].shape)
+        print(events["freqs"].shape, events["raw_mean"].shape, events["corr_mean"].shape)
         print(events["bout_start"].shape, events["spindle_peak"].shape)
 
     Returns:
         Dict keyed by :data:`~infraslow.processing.subject_pipeline.STAGE_EVENT_FIELDS`
-        (``freqs``, ``corr_mean``, ``spindle_start/stop/peak``, ``bout_start/stop/n_spindles``).
+        (``freqs``, ``raw_mean``, ``corr_mean``, ``spindle_start/stop/peak``,
+        ``bout_start/stop/n_spindles``).
     """
     with np.load(npz_path, allow_pickle=False) as data:
         return {field: data[npz_key(channel, field)] for field in STAGE_EVENT_FIELDS}

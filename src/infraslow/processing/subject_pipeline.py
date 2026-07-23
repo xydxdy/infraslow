@@ -342,6 +342,7 @@ def find_stage_bouts(
 #: :func:`calculate_stage_events`); npz-key suffix each maps to.
 STAGE_EVENT_FIELDS: Dict[str, str] = {
     "freqs": "spectra__freqs",
+    "raw_mean": "spectra__raw_mean",
     "corr_mean": "spectra__corr_mean",
     "spindle_start": "spindles__start",
     "spindle_stop": "spindles__stop",
@@ -352,7 +353,7 @@ STAGE_EVENT_FIELDS: Dict[str, str] = {
 }
 #: dtype for each field above -- float64 throughout except the spindle count.
 _STAGE_EVENT_DTYPES: Dict[str, Any] = {
-    "freqs": np.float64, "corr_mean": np.float64,
+    "freqs": np.float64, "raw_mean": np.float64, "corr_mean": np.float64,
     "spindle_start": np.float64, "spindle_stop": np.float64, "spindle_peak": np.float64,
     "bout_start": np.float64, "bout_stop": np.float64, "bout_n_spindles": np.int64,
 }
@@ -412,9 +413,10 @@ def calculate_stage_events(
        power_envelope`) to the bout window and take its infraslow spectrum
        (:func:`~infraslow.processing.infraslow.infraslow_spectrum`) -- the
        continuous-EEG view, matching ``demo_infraslow_yasa_average.ipynb``.
-    5. Normalise to unit band-area and baseline-correct (subtract the
-       ``baseline_band`` mean), matching the reference notebook's spectrum
-       post-processing; average the corrected spectra across bouts.
+    5. Normalise to unit band-area (the "real"/uncorrected spectrum, averaged
+       across bouts into ``raw_mean``) and baseline-correct (subtract the
+       ``baseline_band`` mean, matching the reference notebook's spectrum
+       post-processing; averaged across bouts into ``corr_mean``).
 
     Args:
         hypnogram: Per-epoch YASA integer stage codes.
@@ -431,12 +433,14 @@ def calculate_stage_events(
             a bout must contain >= 1 assigned spindle to be kept.
 
     Returns:
-        Dict with :data:`STAGE_EVENT_FIELDS` keys: ``freqs``, ``corr_mean``
-        (bout-averaged baseline-corrected relative spectrum), ``bout_start``,
-        ``bout_stop``, ``bout_n_spindles`` (one entry per qualifying bout), and
-        ``spindle_start``, ``spindle_stop``, ``spindle_peak`` (every spindle
-        assigned to a qualifying bout). All empty (never NaN-filled -- absence is
-        meaningful) when no bout qualifies.
+        Dict with :data:`STAGE_EVENT_FIELDS` keys: ``freqs``, ``raw_mean``
+        (bout-averaged unit-band-area-normalised spectrum, *before* baseline
+        correction -- the "real" spectrum), ``corr_mean`` (the same, minus the
+        ``baseline_band`` mean -- the baseline-corrected relative spectrum),
+        ``bout_start``, ``bout_stop``, ``bout_n_spindles`` (one entry per
+        qualifying bout), and ``spindle_start``, ``spindle_stop``,
+        ``spindle_peak`` (every spindle assigned to a qualifying bout). All
+        empty (never NaN-filled -- absence is meaningful) when no bout qualifies.
     """
     if stage not in STAGE_GROUP_CODES:
         raise KeyError(f"Unknown stage group {stage!r}; expected one of {tuple(STAGE_GROUP_CODES)}.")
@@ -465,6 +469,7 @@ def calculate_stage_events(
     spindle_start_chunks: List[np.ndarray] = []
     spindle_stop_chunks: List[np.ndarray] = []
     spindle_peak_chunks: List[np.ndarray] = []
+    raw_specs: List[np.ndarray] = []
     corrected_specs: List[np.ndarray] = []
     freqs: Optional[np.ndarray] = None
     band_m = base_m = None
@@ -498,16 +503,19 @@ def calculate_stage_events(
             continue
         rel = spec.psd / denom
         corrected = rel - float(rel[base_m].mean())
-        if np.all(np.isfinite(corrected)):
+        if np.all(np.isfinite(corrected)) and np.all(np.isfinite(rel)):
+            raw_specs.append(rel)
             corrected_specs.append(corrected)
 
     out_freqs = freqs if (corrected_specs and freqs is not None) else np.empty(0)
+    raw_mean = np.mean(np.vstack(raw_specs), axis=0) if raw_specs else np.empty(0)
     corr_mean = np.mean(np.vstack(corrected_specs), axis=0) if corrected_specs else np.empty(0)
     spindle_start = np.concatenate(spindle_start_chunks) if spindle_start_chunks else np.empty(0)
     spindle_stop = np.concatenate(spindle_stop_chunks) if spindle_stop_chunks else np.empty(0)
     spindle_peak = np.concatenate(spindle_peak_chunks) if spindle_peak_chunks else np.empty(0)
     return {
         "freqs": np.asarray(out_freqs, dtype=np.float64),
+        "raw_mean": np.asarray(raw_mean, dtype=np.float64),
         "corr_mean": np.asarray(corr_mean, dtype=np.float64),
         "bout_start": np.asarray(bout_start, dtype=np.float64),
         "bout_stop": np.asarray(bout_stop, dtype=np.float64),

@@ -7,7 +7,8 @@ Watson, 2018). This module quantifies that rhythm from the continuous EEG --
 band-pass to sigma, take the Hilbert power envelope, down-sample it, and read
 off its low-frequency spectrum (:func:`power_envelope` -> :func:`infraslow_spectrum`).
 
-Everything here is pure NumPy/SciPy (no matplotlib, no YASA).
+Everything here is pure NumPy/SciPy plus MNE for band-pass filtering (no
+matplotlib, no YASA).
 """
 
 from __future__ import annotations
@@ -15,11 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import mne
 import numpy as np
 import scipy.signal as signal
 from scipy.optimize import curve_fit
-
-from .signal import ButterFilter
 
 # ``np.trapz`` is deprecated in NumPy 2.0 in favour of ``np.trapezoid``; use
 # whichever the installed NumPy provides.
@@ -107,14 +107,14 @@ def power_envelope(
     band: Tuple[float, float] = DEFAULT_SIGMA_BAND,
     sf_env: float = DEFAULT_SF_ENV,
     smooth_sec: Optional[float] = None,
-    order: int = 4,
     to_db: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Sigma-band power envelope of one channel, down-sampled to ``sf_env``.
 
-    Band-passes ``data`` to ``band`` (zero-phase Butterworth), squares the
-    Hilbert analytic amplitude to get instantaneous sigma power, optionally
-    smooths it, averages it into consecutive ``1/sf_env``-second bins, and (by
+    Band-passes ``data`` to ``band`` (MNE's zero-phase FIR filter,
+    ``mne.filter.filter_data`` with ``method="fir"``), squares the Hilbert
+    analytic amplitude to get instantaneous sigma power, optionally smooths
+    it, averages it into consecutive ``1/sf_env``-second bins, and (by
     default) converts to dB -- so the result matches the reference ``get_iso``,
     whose infraslow spectrum is taken on the **log** sigma-power series. Working
     in dB compresses heavy-tailed spindle transients that would otherwise smear
@@ -127,7 +127,6 @@ def power_envelope(
         sf_env: Output rate (Hz) of the down-sampled envelope.
         smooth_sec: If given, moving-average the full-rate power over this many
             seconds before down-sampling (extra high-frequency smoothing).
-        order: Butterworth order for the band-pass.
         to_db: If ``True`` (default, matches the reference), return the envelope
             in dB (``10*log10``); set ``False`` for the raw linear power.
 
@@ -139,7 +138,7 @@ def power_envelope(
     if sf <= 0 or sf_env <= 0:
         raise ValueError(f"sf and sf_env must be positive; got {sf}, {sf_env}.")
 
-    filt = ButterFilter(sf, list(band), mode="band", order=order)(x)
+    filt = mne.filter.filter_data(x, sf, l_freq=band[0], h_freq=band[1], method="fir", verbose=False)
     power = np.abs(signal.hilbert(filt)) ** 2
 
     if smooth_sec:

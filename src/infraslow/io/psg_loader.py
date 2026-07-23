@@ -7,14 +7,23 @@ acquisition systems) onto a fixed set of *canonical* channel names through a
 caller-supplied alias map.
 
 Scope is deliberately narrow. The loader **only** locates, validates, opens and
-extracts raw signals. The one optional exception is uniform **resampling**: when
-``sf`` is set, every channel is resampled to that common rate *as it is read*
-into :attr:`~BioserenityPSGLoader.data` -- a convenience that simply selects the
-resampling reader from :mod:`infraslow.processing.signal` (each channel's native
-rate comes from lunapi ``inst.headers()``; resampling is scipy Fourier
-resampling). That is what lets channels with differing native rates pack into one
-array. It still performs no other preprocessing -- no filtering, re-referencing,
-scaling, or epoching. Those belong in downstream analysis code, not in a loader.
+extracts raw signals. There are two optional exceptions, both convenience
+selections of readers/filters from :mod:`infraslow.processing.signal`, not
+general preprocessing:
+
+* **Resampling**: when ``sf`` is set, every channel is resampled to that common
+  rate *as it is read* into :attr:`~BioserenityPSGLoader.data` (each channel's
+  native rate comes from lunapi ``inst.headers()``; resampling is scipy Fourier
+  resampling). That is what lets channels with differing native rates pack into
+  one array.
+* **Powerline notch filtering**: by default (``notch_freq=60.0``), every channel
+  of :attr:`~BioserenityPSGLoader.data` is notch-filtered at ``notch_freq``
+  *after* resampling, via an MNE zero-phase FIR notch filter. Set
+  ``notch_freq=None`` to skip it.
+
+It still performs no other preprocessing -- no band-pass filtering,
+re-referencing, scaling, or epoching. Those belong in downstream analysis code,
+not in a loader.
 
 LunaAPI touchpoints (confirmed against lunapi; see zzz-luna.org/luna/lunapi)
 ---------------------------------------------------------------------------
@@ -302,6 +311,13 @@ class BioserenityPSGLoader:
         Optional ``inst -> {channel_label: native_hz}`` callback used to read
         native sampling rates (for back-filling ``sf`` and for the resampling
         reader). Defaults to lunapi's ``inst.headers()``. Injectable for testing.
+    notch_freq:
+        Frequency in Hz to notch out (powerline noise) via a zero-phase FIR
+        notch filter (``mne.filter.notch_filter`` with ``method="fir"``),
+        applied to every channel of :attr:`data` after resampling (whether that
+        resampling was explicit via ``sf`` or the data's native rate).
+        Default ``60.0`` (US/domestic powerline; use ``50.0`` where mains is
+        50 Hz). Set to ``None`` to skip notch filtering entirely.
     annotation_loader:
         Callback ``(inst, edf_path) -> Any`` invoked after signals load; its
         return value is exposed via :attr:`annotations`. When left ``None``
@@ -331,6 +347,7 @@ class BioserenityPSGLoader:
     case_insensitive: bool = True
     sf: Optional[float] = None
     rate_lookup: Optional[RateLookup] = None
+    notch_freq: Optional[float] = 60.0
     annotation_loader: Optional[AnnotationLoader] = None
     proj_factory: Optional[ProjFactory] = None
     channel_lister: Optional[ChannelLister] = None
@@ -368,6 +385,11 @@ class BioserenityPSGLoader:
                 raise ValueError(
                     "Pass either sf (to auto-select the resampling reader) or an "
                     "explicit signal_reader, not both."
+                )
+        if self.notch_freq is not None:
+            if not isinstance(self.notch_freq, (int, float)) or self.notch_freq <= 0:
+                raise ValueError(
+                    f"notch_freq must be a positive frequency or None, got {self.notch_freq!r}."
                 )
         self._validate_subject_id()
         # Fail fast on a requested canonical name that the alias map cannot ever
@@ -512,6 +534,9 @@ class BioserenityPSGLoader:
             if self.sf is not None:
                 logger.info("Native sampling frequency of data: %g Hz.", self.sf)
 
+        if self.notch_freq is not None and self.n_channels > 0:
+            self._data = self._apply_notch(self._data)
+
         if self.annotation_loader is not None:
             self._annotations = self._load_annotations(self._inst, self._edf_path)
 
@@ -645,6 +670,25 @@ class BioserenityPSGLoader:
                     f"({len(physical)}, n_samples)."
                 )
         return data
+
+    def _apply_notch(self, data: np.ndarray) -> np.ndarray:
+        """Notch-filter ``data`` (already resampled) at :attr:`notch_freq`.
+
+        Calls ``mne.filter.notch_filter`` directly (``method="fir"``, zero-phase);
+        ``mne`` is imported lazily, matching the lazy ``lunapi``/resampling-reader
+        imports elsewhere in this module.
+        """
+        if self.sf is None:
+            raise DataLoadError(
+                "notch_freq is set but sf could not be determined; cannot "
+                "notch-filter without a known sampling rate."
+            )
+        import mne  # noqa: PLC0415 - lazy, keeps mne optional at import time
+
+        logger.info("Applying %g Hz notch filter (FIR) at %g Hz sampling rate.", self.notch_freq, self.sf)
+        return mne.filter.notch_filter(
+            np.asarray(data, dtype=float), Fs=self.sf, freqs=self.notch_freq, method="fir", verbose=False
+        )
 
     def _load_annotations(self, inst: Any, edf_path: Path) -> Any:
         assert self.annotation_loader is not None
