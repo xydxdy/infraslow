@@ -16,8 +16,10 @@ For each valid subject, :func:`calculate_features` produces two things:
    30-s epochs) -- see :func:`calculate_sleep_metadata`.
 2. Per-``CHANNELS`` EEG channel and per-``NPZ_STAGES`` stage group, the
    infraslow (~0.02 Hz) sigma-power oscillation spectrum plus the underlying
-   spindle/bout detail -- see :func:`calculate_channel_events`, written
-   to disk as one ``.npz`` per subject per stage by the caller.
+   spindle/bout detail, plus a standard-band (:data:`BANDS`: delta/theta/
+   alpha/sigma/beta/gamma) Welch-PSD summary -- see
+   :func:`calculate_channel_events` (and :func:`calculate_band_psd`),
+   written to disk as one ``.npz`` per subject per stage by the caller.
 
 Anything that cannot be computed becomes ``numpy.nan``/empty arrays rather than
 raising, so one bad channel/stage never sinks a subject and one bad subject
@@ -37,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy.signal as signal
 
 from ..io.hypnodensity import (
     DEFAULT_HYPNODENSITY_SUFFIX,
@@ -55,6 +58,7 @@ from .spindle import (
 from .infraslow import (
     DEFAULT_INFRASLOW_BAND,
     DEFAULT_SF_ENV,
+    DEFAULT_SIGMA_BAND,
     infraslow_spectrum,
     power_envelope,
 )
@@ -91,6 +95,36 @@ INFRASLOW_STAGES: Tuple[str, ...] = ("N1", "N2", "N3", "NREM")
 NPZ_STAGES: Tuple[str, ...] = INFRASLOW_STAGES
 # EEG channels analysed per subject in the v2 (per-channel) npz pipeline.
 CHANNELS: Tuple[str, ...] = DEFAULT_EEG_CHANNELS
+
+# Standard EEG bands for the per-channel, per-stage average Welch-PSD summary
+# (see calculate_band_psd). Independent of SIGMA_BAND above (which is tuned
+# for spindle/sigma-power-envelope detection, not this general-purpose
+# summary); "Sigma" here matches infraslow.processing.infraslow.DEFAULT_SIGMA_BAND.
+BANDS: Dict[str, Tuple[float, float]] = {
+    "Delta": (0.5, 4.0),
+    "Theta": (4.0, 8.0),
+    "Alpha": (8.0, 13.0),
+    "Sigma": DEFAULT_SIGMA_BAND,
+    "Beta": (13.0, 30.0),
+    "Gamma": (30.0, 45.0),
+}
+# Welch segment length (s) for calculate_band_psd -- short relative to
+# WINDOW_SEC (which is for the ~1 Hz sigma-power envelope) since it windows
+# raw EEG; 4 s @ 128 Hz gives 0.25 Hz resolution, enough to resolve Delta
+# (0.5-4 Hz) while comfortably fitting inside every qualifying bout
+# (>= MIN_BOUT_SEC = 200 s).
+BAND_PSD_WINDOW_SEC: float = 4.0
+
+
+def band_freqs_field(band_name: str) -> str:
+    """The :data:`STAGE_EVENT_FIELDS`/output-dict key for one :data:`BANDS` entry's frequency axis."""
+    return f"band_freqs_{band_name.lower()}"
+
+
+def band_psd_field(band_name: str) -> str:
+    """The :data:`STAGE_EVENT_FIELDS`/output-dict key for one :data:`BANDS` entry's PSD values."""
+    return f"band_psd_{band_name.lower()}"
+
 
 # --------------------------------------------------------------------------- #
 # Output schema
@@ -350,12 +384,16 @@ STAGE_EVENT_FIELDS: Dict[str, str] = {
     "bout_start": "bouts__start",
     "bout_stop": "bouts__stop",
     "bout_n_spindles": "bouts__n_spindles",
+    **{band_freqs_field(name): f"bandpsd__{name}__freqs" for name in BANDS},
+    **{band_psd_field(name): f"bandpsd__{name}__psd" for name in BANDS},
 }
 #: dtype for each field above -- float64 throughout except the spindle count.
 _STAGE_EVENT_DTYPES: Dict[str, Any] = {
     "freqs": np.float64, "raw_mean": np.float64, "corr_mean": np.float64,
     "spindle_start": np.float64, "spindle_stop": np.float64, "spindle_peak": np.float64,
     "bout_start": np.float64, "bout_stop": np.float64, "bout_n_spindles": np.int64,
+    **{band_freqs_field(name): np.float64 for name in BANDS},
+    **{band_psd_field(name): np.float64 for name in BANDS},
 }
 
 
@@ -526,6 +564,86 @@ def calculate_stage_events(
     }
 
 
+def calculate_band_psd(
+    data: np.ndarray,
+    sf: float,
+    bout_start: Sequence[float],
+    bout_stop: Sequence[float],
+    *,
+    bands: Mapping[str, Tuple[float, float]] = BANDS,
+    window_sec: float = BAND_PSD_WINDOW_SEC,
+    detrend: str = "linear",
+) -> Dict[str, np.ndarray]:
+    """Per-band Welch PSD for one channel, averaged across bouts.
+
+    Independent, additive summary alongside the existing sigma-power /
+    infraslow-spectrum pipeline (:func:`calculate_stage_events`) -- does not
+    read or alter anything it computes. Runs :func:`scipy.signal.welch`
+    **once** per bout on the full raw channel signal (same Welch settings as
+    :func:`~infraslow.processing.infraslow.infraslow_spectrum`: Hann window,
+    50% overlap, linear detrend), averages the per-bout PSDs, then slices the
+    shared frequency axis to each band's ``(low_hz, high_hz)`` range -- so each
+    band's output is a real PSD curve (with its own frequency axis, for
+    plotting) rather than a single collapsed power value.
+
+    Args:
+        data: 1-D raw EEG signal for one channel, sampled at ``sf`` (the same
+            signal :func:`calculate_channel_events` reads for the sigma-power
+            envelope -- pass it straight through, do not re-filter it first).
+        sf: Sampling rate (Hz) of ``data``.
+        bout_start, bout_stop: Bout window edges (s) to average over -- pass a
+            stage's qualifying bouts (e.g. :func:`calculate_stage_events`'s
+            ``bout_start``/``bout_stop`` output) for a comparable, per-stage
+            summary.
+        bands: ``{band_name: (low_hz, high_hz)}``; default :data:`BANDS`.
+        window_sec: Welch segment length (s); default :data:`BAND_PSD_WINDOW_SEC`.
+        detrend: Passed to :func:`scipy.signal.welch`.
+
+    Returns:
+        ``{band_freqs_field(name): freqs, band_psd_field(name): psd}`` per band
+        (see :func:`band_freqs_field`/:func:`band_psd_field`) -- ``freqs`` and
+        ``psd`` are equal-length arrays covering just that band, empty when no
+        bout has enough samples for one Welch segment (mirrors the
+        empty-means-absent convention :func:`calculate_stage_events` uses for
+        ``corr_mean`` etc).
+    """
+    x = np.asarray(data, dtype=float).ravel()
+    starts = np.asarray(bout_start, dtype=float).ravel()
+    stops = np.asarray(bout_stop, dtype=float).ravel()
+
+    freqs: Optional[np.ndarray] = None
+    per_bout_psd: List[np.ndarray] = []
+    if x.size and sf > 0:
+        nperseg = int(min(x.size, max(8, round(window_sec * sf))))
+        for a, b in zip(starts, stops):
+            i0 = max(int(round(a * sf)), 0)
+            i1 = min(int(round(b * sf)), x.size)
+            seg = x[i0:i1]
+            if seg.size < nperseg:
+                continue
+            f, p = signal.welch(
+                seg, fs=sf, nperseg=nperseg, noverlap=nperseg // 2, detrend=detrend, window="hann",
+            )
+            if not np.all(np.isfinite(p)):
+                continue
+            if freqs is None:
+                freqs = f
+            per_bout_psd.append(p)
+
+    mean_psd = np.mean(np.vstack(per_bout_psd), axis=0) if per_bout_psd else None
+    out: Dict[str, np.ndarray] = {}
+    for band_name, (lo, hi) in bands.items():
+        freqs_field, psd_field = band_freqs_field(band_name), band_psd_field(band_name)
+        if mean_psd is None or freqs is None:
+            out[freqs_field] = np.empty(0, dtype=np.float64)
+            out[psd_field] = np.empty(0, dtype=np.float64)
+            continue
+        mask = (freqs >= lo) & (freqs <= hi)
+        out[freqs_field] = np.asarray(freqs[mask], dtype=np.float64)
+        out[psd_field] = np.asarray(mean_psd[mask], dtype=np.float64)
+    return out
+
+
 def calculate_channel_events(
     subject_id: str,
     hypnogram: np.ndarray,
@@ -549,7 +667,11 @@ def calculate_channel_events(
     shared envelope to each bout for the infraslow spectrum, and assigns
     spindles to bouts purely by peak-time interval membership (not by which
     stage YASA itself scored the spindle epoch as), so the same envelope and
-    detected-spindle set feed the N2, N3, and NREM analyses.
+    detected-spindle set feed the N2, N3, and NREM analyses. Independently
+    (and without affecting any of that), :func:`calculate_band_psd` also
+    Welch-PSDs this channel's raw signal over that same stage's qualifying
+    bouts and slices out each :data:`BANDS` range, for a standard per-band PSD
+    summary alongside the infraslow spectrum.
 
     Builds (or reuses) a :class:`~infraslow.io.psg_loader.BioserenityPSGLoader`
     for every channel in ``channels``. If a channel cannot be resolved (missing
@@ -611,7 +733,11 @@ def calculate_channel_events(
 
         # dB sigma-power envelope for this channel, computed once and reused
         # across every stage (matches demo_infraslow_yasa_average.ipynb).
+        # ``data`` (the raw channel signal) is also reused below for the
+        # per-band average-power summary, so it is initialised here even
+        # though the sigma-power envelope itself does not need that.
         t_env = sigma_db = np.empty(0, dtype=float)
+        data = np.empty(0, dtype=float)
         try:
             data = np.asarray(loader.get_channel(ch), dtype=float)
             t_env, sigma_db = power_envelope(
@@ -642,6 +768,31 @@ def calculate_channel_events(
                                error_message=str(exc), include_traceback=True)
                     )
                 out[ch][stage] = empty_stage_events()
+
+            # Additive per-band Welch-PSD summary over this stage's qualifying
+            # bouts (see calculate_band_psd) -- independent of, and does not
+            # affect, the infraslow spectrum/spindle/bout fields computed above.
+            try:
+                band_psd = calculate_band_psd(
+                    data, float(loader.sf),
+                    out[ch][stage]["bout_start"], out[ch][stage]["bout_stop"],
+                )
+                out[ch][stage].update(band_psd)
+            except Exception as exc:  # noqa: BLE001 - band PSD must not sink the channel/subject
+                logger.warning(
+                    "Band PSD failed for %s channel=%s stage=%s: %s", subject_id, ch, stage, exc
+                )
+                if issues_out is not None:
+                    issues_out.append(
+                        _issue(channel=ch, stage=stage, error_type=type(exc).__name__,
+                               error_message=str(exc), include_traceback=True)
+                    )
+                out[ch][stage].update(
+                    {
+                        **{band_freqs_field(name): np.empty(0, dtype=np.float64) for name in BANDS},
+                        **{band_psd_field(name): np.empty(0, dtype=np.float64) for name in BANDS},
+                    }
+                )
     return out
 
 
@@ -727,6 +878,7 @@ def calculate_features(
 
 __all__ = [
     "SF", "CHANNELS", "SIGMA_BAND", "INFRASLOW_BAND", "BASELINE_BAND",
+    "BANDS", "BAND_PSD_WINDOW_SEC",
     "MIN_BOUT_SEC", "WINDOW_SEC", "EPOCH_SEC", "SF_ENV",
     "STAGE_GROUP_CODES", "INFRASLOW_STAGES", "NPZ_STAGES",
     "METADATA_COLUMNS", "YASA_STAT_COLUMNS",
@@ -734,7 +886,9 @@ __all__ = [
     "find_valid_bioserenity_subjects",
     "load_hypnodensity_as_hypnogram", "calculate_yasa_sleep_statistics",
     "find_stage_bouts",
-    "calculate_stage_events", "calculate_channel_events", "STAGE_EVENT_FIELDS",
+    "calculate_stage_events", "calculate_band_psd",
+    "band_freqs_field", "band_psd_field",
+    "calculate_channel_events", "STAGE_EVENT_FIELDS",
     "empty_stage_events",
     "metadata_row_columns", "calculate_sleep_metadata", "calculate_features",
 ]
