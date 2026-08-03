@@ -34,3 +34,6 @@ slurm-*.out
 .pdf
 .pptx
 .out
+
+# Large metadata CSVs (too big for GitHub; kept local / on $OAK)
+src/infraslow/metadata/*.csv

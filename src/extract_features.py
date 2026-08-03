@@ -95,6 +95,12 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+from infraslow.config import (
+    DEFAULT_EDF_DIR,
+    DEFAULT_HYPNO_DIR,
+    DEFAULT_METADATA,
+    DEFAULT_METADATA2,
+)
 from infraslow.io.hypnodensity import DEFAULT_HYPNODENSITY_SUFFIX
 from infraslow.processing.subject_pipeline import (
     CHANNELS,
@@ -116,10 +122,6 @@ logger = logging.getLogger("run_all_metrics")
 # --------------------------------------------------------------------------- #
 # Defaults / constants
 # --------------------------------------------------------------------------- #
-DEFAULT_METADATA = "$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv"
-DEFAULT_METADATA2 = "$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv"
-DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
-DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
 DEFAULT_OUTPUT = "$SCRATCH/data/metadata.csv"
 DEFAULT_ERROR_OUTPUT = "$SCRATCH/data/errors.csv"
 DEFAULT_NPZ_DIR = "$SCRATCH/data/npz"
