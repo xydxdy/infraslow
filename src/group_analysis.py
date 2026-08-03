@@ -67,22 +67,36 @@ import os
 for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+import csv  # noqa: E402
+import io  # noqa: E402
+import re  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor  # noqa: E402 - see env-var shim above
 from functools import partial  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Dict, List, Optional, Tuple  # noqa: E402
+from typing import Dict, List, Optional, Sequence, Set, Tuple  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from infraslow.config import (  # noqa: E402
+    DEFAULT_DRUG_EXCLUDE_LIST,
+    DEFAULT_DRUG_METADATA,
+    DEFAULT_METADATA,
+    DEFAULT_METADATA2,
+)
 from infraslow.io.utils import N_IO_WORKERS  # noqa: E402
 from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs  # noqa: E402
 from infraslow.processing.spindle import spindle_rate_per_min  # noqa: E402
-from infraslow.processing.subject_pipeline import INFRASLOW_BAND  # noqa: E402
+from infraslow.processing.subject_pipeline import (  # noqa: E402
+    INFRASLOW_BAND,
+    combine_bioserenity_metadata,
+    load_bioserenity_metadata,
+)
 from infraslow.stats.group_assignment import (  # noqa: E402
     HIGH_LABEL,
     LOW_LABEL,
     MID_LABEL,
+    MIN_SUBJECTS_FOR_CUTOFF,
     assign_spindle_rate_groups,
 )
 from infraslow.stats.group_comparison import compare_parameters  # noqa: E402
@@ -135,6 +149,198 @@ PERIOD_FREQ_TOLERANCE = 1e-6
 #: both sit on the same fixed Welch grid, so this only needs to absorb float noise, not
 #: bridge distinct grid points (spacing 1/WINDOW_SEC = 0.01 Hz, see subject_pipeline.py).
 DOMINANT_FREQ_TOLERANCE = 1e-6
+
+#: Metadata CSVs consulted for drug-usage flag columns (see
+#: :func:`load_drug_excluded_subject_ids`). DEFAULT_METADATA/DEFAULT_METADATA2
+#: carry Bioserenity's own short drug-class columns (e.g. "Benzodiazepine");
+#: DEFAULT_DRUG_METADATA carries the finer-grained ATC-category columns (e.g.
+#: "Psycholeptics Hypnotics Sedatives").
+DRUG_METADATA_PATHS: Tuple[str, ...] = (DEFAULT_METADATA, DEFAULT_METADATA2, DEFAULT_DRUG_METADATA)
+
+
+# --------------------------------------------------------------------------- #
+# Drug-usage exclusion (--exclude-drug-users)
+# --------------------------------------------------------------------------- #
+_DRUG_NAME_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_drug_name(name: str) -> str:
+    """Loosely match a drug/drug_exclude.csv entry to a metadata drug-flag
+    column name, ignoring case/punctuation/whitespace differences -- e.g.
+    drug_exclude.csv's "Antipruritics including antihistamines anesthetics
+    etc." vs. DEFAULT_DRUG_METADATA's "Antipruritics, including
+    antihistamines, anesthetics, etc." """
+    return _DRUG_NAME_NORMALIZE_RE.sub(" ", name.lower()).strip()
+
+
+def load_drug_exclude_names(path: Path) -> List[str]:
+    """Every drug name listed in a drug/drug_exclude.csv-style file (single
+    ``drug`` column, one name per row)."""
+    names = pd.read_csv(path)["drug"].dropna().astype(str).str.strip()
+    return [n for n in names if n]
+
+
+def resolve_requested_drug_names(requested: Sequence[str], drug_exclude_list_path: Path) -> List[str]:
+    """``--exclude-drug-users`` values -> the drug names to filter on.
+
+    An empty/omitted list of values, or any value spelled "All" (any case),
+    means "every drug in ``drug_exclude_list_path``"; otherwise the given
+    names are used as-is (e.g. ``["Z_Drugs", "Benzodiazepine"]``).
+    """
+    if not requested or any(name.strip().lower() == "all" for name in requested):
+        return load_drug_exclude_names(drug_exclude_list_path)
+    return list(requested)
+
+
+def _read_metadata_header(path: Path) -> List[str]:
+    """Column names for one metadata CSV.
+
+    Repairs DEFAULT_DRUG_METADATA's header, which (unlike its data rows and
+    unlike DEFAULT_METADATA/DEFAULT_METADATA2) is wrapped in one extra layer
+    of CSV quoting (e.g. ``'"ID,ATC,...,""Antidiarrheals, intestinal ...""...'``)
+    -- parsed literally, that outer quoting would collapse the whole header
+    into a single column instead of one per drug category.
+    """
+    with open(path, newline="") as f:
+        line = f.readline().rstrip("\r\n")
+    if line.startswith('"') and line.endswith('"'):
+        line = line[1:-1].replace('""', '"')
+    return next(csv.reader(io.StringIO(line)))
+
+
+def load_drug_excluded_subject_ids(
+    drug_names: Sequence[str], metadata_paths: Sequence[str] = DRUG_METADATA_PATHS,
+) -> Set[str]:
+    """Subject ids flagged (value == 1) for any of ``drug_names`` in any of ``metadata_paths``.
+
+    Each path is an ``ID`` + one-hot drug-flag-column CSV; a name is matched
+    to a column case/punctuation-insensitively (:func:`_normalize_drug_name`)
+    independently in each file, since the same drug can be a column in more
+    than one of them. A name matching no column in *any* file is logged and
+    otherwise ignored (e.g. a typo in ``--exclude-drug-users``).
+    """
+    wanted = {_normalize_drug_name(n): n for n in drug_names}
+    matched: Set[str] = set()
+    excluded_ids: Set[str] = set()
+    for raw_path in metadata_paths:
+        path = Path(raw_path)
+        if not path.is_file():
+            logger.warning("drug-exclusion metadata file not found, skipping: %s", path)
+            continue
+        header = _read_metadata_header(path)
+        if "ID" not in header:
+            logger.warning("drug-exclusion metadata file has no ID column, skipping: %s", path)
+            continue
+        col_by_key = {_normalize_drug_name(c): c for c in header if c != "ID"}
+        hit = {key: col_by_key[key] for key in wanted if key in col_by_key}
+        if not hit:
+            continue
+        matched.update(wanted[key] for key in hit)
+        df = pd.read_csv(path, skiprows=1, header=None, names=header, usecols=["ID", *hit.values()], dtype=str)
+        df["ID"] = df["ID"].astype(str).str.strip().str.replace(r"^(\d+)\.0$", r"\1", regex=True)
+        for col in hit.values():
+            flagged = pd.to_numeric(df[col], errors="coerce").fillna(0) == 1
+            excluded_ids.update(df.loc[flagged, "ID"])
+
+    unmatched = [n for key, n in wanted.items() if n not in matched]
+    if unmatched:
+        logger.warning("drug exclusion: no matching metadata column found for: %s", ", ".join(unmatched))
+    return excluded_ids
+
+
+# --------------------------------------------------------------------------- #
+# Demographic filters (--sex / --age-group / --bmi-group)
+# --------------------------------------------------------------------------- #
+#: Physiologically plausible ranges used to sanity-guard Age/BMI before computing
+#: a low/mid/high cutoff -- DEFAULT_METADATA/DEFAULT_METADATA2 have occasional
+#: data-entry garbage (e.g. Age -62 or 6060, BMI 0 or 4168) that would otherwise
+#: skew the cutoff. A subject outside these ranges is excluded from the cutoff
+#: computation *and* from every --age-group/--bmi-group band -- their infraslow
+#: results themselves are untouched, only --age-group/--bmi-group filtering
+#: treats them as missing.
+AGE_VALID_RANGE: Tuple[float, float] = (0.0, 120.0)
+BMI_VALID_RANGE: Tuple[float, float] = (10.0, 80.0)
+
+#: --sex accepts either spelling used across the two metadata sources
+#: (DEFAULT_METADATA: "Male"/"Female"; DEFAULT_METADATA2: "M"/"F"), case-insensitive.
+SEX_LABELS: Dict[str, str] = {"m": "Male", "male": "Male", "f": "Female", "female": "Female"}
+
+#: DEFAULT_METADATA/DEFAULT_METADATA2 -- combined for --sex/--age-group/--bmi-group only
+#: (never merged into the saved output CSVs).
+DEMOGRAPHIC_METADATA_PATHS: Tuple[str, ...] = (DEFAULT_METADATA, DEFAULT_METADATA2)
+
+
+def load_subject_demographics(metadata_paths: Sequence[str] = DEMOGRAPHIC_METADATA_PATHS) -> pd.DataFrame:
+    """Combined ``ID, Age, Gender, BMI`` across ``metadata_paths`` (one row per
+    distinct ``ID``; see :func:`~infraslow.processing.subject_pipeline.
+    load_bioserenity_metadata`/:func:`~infraslow.processing.subject_pipeline.
+    combine_bioserenity_metadata`)."""
+    frames = [load_bioserenity_metadata(Path(p)) for p in metadata_paths if Path(p).is_file()]
+    if not frames:
+        raise SystemExit(f"No demographic metadata file found among: {list(metadata_paths)}")
+    return combine_bioserenity_metadata(*frames)
+
+
+def normalize_sex_label(value: object) -> Optional[str]:
+    """"Male"/"M"/"female"/... (any case) -> "Male"/"Female", else ``None``."""
+    return SEX_LABELS.get(str(value).strip().lower())
+
+
+def select_sex_group(subject_ids: pd.Series, sex_values: pd.Series, sex: str) -> Set[str]:
+    """Subject ids whose (normalized) sex matches ``sex`` (see :data:`SEX_LABELS`)."""
+    target = normalize_sex_label(sex)
+    if target is None:
+        raise SystemExit(f"--sex must be one of Male/Female (case-insensitive; 'M'/'F' also work), got: {sex!r}")
+    subject_ids = pd.Series(subject_ids).reset_index(drop=True).astype(str)
+    normalized = pd.Series(sex_values).reset_index(drop=True).map(normalize_sex_label)
+    return set(subject_ids[normalized == target])
+
+
+def select_demographic_group(
+    subject_ids: pd.Series, values: pd.Series, group: str, *, valid_range: Tuple[float, float], label: str,
+) -> Set[str]:
+    """Subject ids in the low/mid/high band of a log1p mean +/- std cutoff over ``values``
+    (e.g. Age or BMI), restricted to ``valid_range`` first (see :data:`AGE_VALID_RANGE`/
+    :data:`BMI_VALID_RANGE`)::
+
+        low  : log1p(value) <  mean - std
+        high : log1p(value) >  mean + std
+        mid  : mean - std <= log1p(value) <= mean + std
+
+    Same method as :func:`~infraslow.stats.group_assignment.assign_spindle_rate_groups`'s
+    spindle-rate cutoff, except this one actually applies ``+/- std`` (that function
+    currently pins both thresholds to the mean -- left as-is there since spindle-rate
+    grouping is already used by production runs; not touched by this feature).
+    """
+    subject_ids = pd.Series(subject_ids).reset_index(drop=True).astype(str)
+    numeric = pd.to_numeric(pd.Series(values), errors="coerce").reset_index(drop=True)
+    in_range = numeric.between(valid_range[0], valid_range[1])
+    valid = numeric[in_range]
+    if valid.size < MIN_SUBJECTS_FOR_CUTOFF:
+        raise SystemExit(
+            f"Need at least {MIN_SUBJECTS_FOR_CUTOFF} subjects with {label} in {valid_range} to "
+            f"compute a low/mid/high cutoff (got {valid.size})."
+        )
+
+    log_values = np.log1p(valid)
+    log_mean = float(log_values.mean())
+    log_std = float(log_values.std(ddof=1)) if log_values.size > 1 else 0.0
+    low_threshold, high_threshold = log_mean - log_std, log_mean + log_std
+    logger.info(
+        "%s log1p mean+/-std cutoff (n=%d in range %s): mean=%.4f std=%.4f -> "
+        "low<%.4f, high>%.4f (original scale: low<%.3f, high>%.3f)",
+        label, valid.size, valid_range, log_mean, log_std, low_threshold, high_threshold,
+        np.expm1(low_threshold), np.expm1(high_threshold),
+    )
+
+    log_all = np.log1p(numeric)
+    if group == "low":
+        mask = in_range & (log_all < low_threshold)
+    elif group == "high":
+        mask = in_range & (log_all > high_threshold)
+    else:
+        mask = in_range & (log_all >= low_threshold) & (log_all <= high_threshold)
+    return set(subject_ids[mask.fillna(False)])
 
 
 # --------------------------------------------------------------------------- #
@@ -598,6 +804,36 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "use the whole validated cohort.",
     )
     parser.add_argument(
+        "--exclude-drug-users", nargs="*", default=None, metavar="DRUG",
+        help="Exclude subjects flagged as using any of the given drug(s), checked against "
+             "DEFAULT_METADATA/DEFAULT_METADATA2/DEFAULT_DRUG_METADATA's drug-usage flag columns "
+             "(matched case/punctuation-insensitively, e.g. 'Benzodiazepine' or 'Psycholeptics "
+             "Hypnotics Sedatives'). Pass with no values, or 'All', to exclude every drug listed in "
+             "--drug-exclude-list; e.g. --exclude-drug-users (all) or "
+             "--exclude-drug-users Z_Drugs Benzodiazepine (just those two). Omit the flag entirely "
+             "to keep every subject regardless of drug use.",
+    )
+    parser.add_argument(
+        "--drug-exclude-list", type=Path, default=Path(DEFAULT_DRUG_EXCLUDE_LIST),
+        help="drug/drug_exclude.csv-style file (single 'drug' column) used when "
+             "--exclude-drug-users is passed with no values or 'All'.",
+    )
+    parser.add_argument(
+        "--sex", default=None, metavar="{Male,Female}",
+        help="Restrict to subjects of one sex (case-insensitive; 'M'/'F' also work), matched "
+             "against DEFAULT_METADATA/DEFAULT_METADATA2's Gender column. Omit for both sexes.",
+    )
+    parser.add_argument(
+        "--age-group", choices=["low", "mid", "high"], default=None,
+        help="Restrict to subjects in the low/mid/high band of a log1p mean+/-std cutoff over "
+             f"Age (computed over this run's cohort; subjects with Age outside {AGE_VALID_RANGE} "
+             "are treated as missing, likely data-entry errors). Omit for every age.",
+    )
+    parser.add_argument(
+        "--bmi-group", choices=["low", "mid", "high"], default=None,
+        help=f"Same as --age-group but for BMI (valid range {BMI_VALID_RANGE}). Omit for every BMI.",
+    )
+    parser.add_argument(
         "--output-dir", type=Path, default=None,
         help="Directory outputs are written to. Defaults to "
              "infraslow/results/group_analysis/{sleep-stage}_{channel}.",
@@ -707,6 +943,56 @@ def main(argv: Optional[List[str]] = None) -> int:
         if raw_df.empty:
             raise SystemExit(f"No subjects with dominant_freq_hz == {args.dominant_freq_hz}; aborting.")
 
+    # --- Drug-usage exclusion, before Step 3 -----------------------------------
+    if args.exclude_drug_users is not None:
+        drug_names = resolve_requested_drug_names(args.exclude_drug_users, args.drug_exclude_list)
+        excluded_ids = load_drug_excluded_subject_ids(drug_names)
+        n_before = len(raw_df)
+        raw_df = raw_df.loc[~raw_df["subject_id"].isin(excluded_ids)].reset_index(drop=True)
+        logger.info(
+            "drug exclusion (%s): %d/%d subject(s) kept (%d matched a drug-flagged id)",
+            ", ".join(drug_names), len(raw_df), n_before, n_before - len(raw_df),
+        )
+        if raw_df.empty:
+            raise SystemExit(f"No subjects remain after excluding drug users ({', '.join(drug_names)}); aborting.")
+
+    # --- Demographic filters (--sex/--age-group/--bmi-group), before Step 3 ---
+    if args.sex is not None or args.age_group is not None or args.bmi_group is not None:
+        demographics = load_subject_demographics()
+        demographics["ID"] = demographics["ID"].astype(str)
+        merged = raw_df[["subject_id"]].merge(demographics, left_on="subject_id", right_on="ID", how="left")
+
+        keep_ids: Optional[Set[str]] = None
+
+        def _intersect(ids: Set[str]) -> None:
+            nonlocal keep_ids
+            keep_ids = ids if keep_ids is None else keep_ids & ids
+
+        if args.sex is not None:
+            _intersect(select_sex_group(merged["subject_id"], merged["Gender"], args.sex))
+        if args.age_group is not None:
+            _intersect(select_demographic_group(
+                merged["subject_id"], merged["Age"], args.age_group,
+                valid_range=AGE_VALID_RANGE, label="Age",
+            ))
+        if args.bmi_group is not None:
+            _intersect(select_demographic_group(
+                merged["subject_id"], merged["BMI"], args.bmi_group,
+                valid_range=BMI_VALID_RANGE, label="BMI",
+            ))
+
+        n_before = len(raw_df)
+        raw_df = raw_df.loc[raw_df["subject_id"].isin(keep_ids)].reset_index(drop=True)
+        logger.info(
+            "demographic filter (sex=%s age_group=%s bmi_group=%s): %d/%d subject(s) kept",
+            args.sex, args.age_group, args.bmi_group, len(raw_df), n_before,
+        )
+        if raw_df.empty:
+            raise SystemExit(
+                f"No subjects remain after the sex={args.sex}/age_group={args.age_group}/"
+                f"bmi_group={args.bmi_group} filter; aborting."
+            )
+
     # --- Step 3: validate -----------------------------------------------------
     validated, excluded, report = validate_records(raw_df, args.sleep_stage, args.channel, rate_unit=args.rate_unit)
     if validated.empty:
@@ -812,7 +1098,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     plot_parameter_comparisons(
         df=compare_df, group_col="spindle_group", parameters=COMPARISON_PARAMETERS,
-        comparison_df=comparison, low_label=LOW_LABEL, high_label=HIGH_LABEL,
+        comparison_df=comparison, group_labels=[LOW_LABEL, HIGH_LABEL],
         output_png=outputs["param_png"], output_pdf=outputs["param_pdf"],
     )
     logger.info("saved %s, %s, %s", outputs["compare_png"], outputs["clean_png"], outputs["param_png"])

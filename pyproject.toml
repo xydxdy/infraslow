@@ -19,6 +19,7 @@ dependencies = [
     "statsmodels",
     "matplotlib",
     "joblib",
+    "pactools",
 ]
 
 [project.optional-dependencies]

@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=10
-#SBATCH --mem=30G
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=6G
 
 # Splits the subject cohort into NUM_SHARDS disjoint pieces; this job processes
 # SHARD_INDEX. Two ways to parallelize, mix and match:
@@ -38,7 +38,7 @@
 
 set -euo pipefail
 
-OUTPUT_ROOT="$SCRATCH/data"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/data_v2}"
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-1}}"
 SHARD_INDEX="${SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-0}}"
 # Stage group(s) to compute/write (see extract_features.py --stages); only
@@ -60,19 +60,18 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-10}"
-export METADATA="$OAK/psg/Bioserenity/Excel/Morpheus_Data_All5.csv"
-export METADATA2="$OAK/psg/Bioserenity/Excel/bioserenity_metadata3.csv"
 export OUTPUT="${OUTPUT_ROOT}/metadata_shard${SHARD_INDEX}.csv"
 export ERROR_OUTPUT="${OUTPUT_ROOT}/errors_shard${SHARD_INDEX}.csv"
 export NPZ_DIR="${OUTPUT_ROOT}/npz"
 
+# --metadata/--metadata2 are omitted -- they default to the checked-in CSVs
+# under src/infraslow/metadata/ (see infraslow/config.py). Pass --metadata
+# explicitly to override.
 python -u src/extract_features.py \
     --workers "${SLURM_CPUS_PER_TASK}" \
     --num-shards "${NUM_SHARDS}" \
     --shard-index "${SHARD_INDEX}" \
     --stages ${STAGES} \
-    --metadata "${METADATA}" \
-    --metadata2 "${METADATA2}" \
     --output "${OUTPUT}" \
     --error-output "${ERROR_OUTPUT}" \
     --npz-dir "${NPZ_DIR}"

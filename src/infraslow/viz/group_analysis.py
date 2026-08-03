@@ -15,6 +15,7 @@ until a figure is actually drawn.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -30,6 +31,7 @@ __all__ = [
     "MID_COLOR",
     "ALL_COLOR",
     "SUBJECT_COLOR",
+    "group_palette",
     "plot_spindle_rate_pretransform",
     "plot_spindle_rate_distribution",
     "plot_group_infraslow_compare",
@@ -54,6 +56,23 @@ TICK_FONTSIZE = 9
 LEGEND_FONTSIZE = 8
 ANNOTATION_FONTSIZE = 8
 SUPTITLE_FONTSIZE = 15
+
+
+def group_palette(n: int) -> List[str]:
+    """One color per group, for a 2+-way violin/scatter comparison.
+
+    2 groups -> low/high; 3 groups -> low/mid/high (matches the fixed
+    low/mid/high spindle-rate palette elsewhere in this module); more than 3
+    falls back to a qualitative colormap since no fixed low/mid/high semantic
+    applies beyond three bands.
+    """
+    if n == 2:
+        return [LOW_COLOR, HIGH_COLOR]
+    if n == 3:
+        return [LOW_COLOR, MID_COLOR, HIGH_COLOR]
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap("tab10")
+    return [cmap(i % 10) for i in range(n)]
 
 
 def _save(fig, output_png: Path, output_pdf: Optional[Path] = None) -> None:
@@ -468,23 +487,58 @@ def plot_cohort_spectrum_clean(
     plt.close(fig)
 
 
+def _parameter_title(parameter: str, comparison_df: pd.DataFrame, group_labels: Sequence[str]) -> str:
+    """``parameter``'s subplot title, annotated with its FDR-adjusted q-value(s).
+
+    ``comparison_df`` may be either per-parameter (``parameter``/``q_value``
+    columns -- ``infraslow.stats.group_comparison.compare_parameters``'s
+    fixed 2-group output) or per-pair (adds ``group_a``/``group_b`` --
+    ``group_analysis_demographics.compare_group_bands``'s output, needed once
+    there are more than 2 groups and thus more than one pairwise q-value).
+    """
+    if "group_a" not in comparison_df.columns:
+        q_by_param = comparison_df.set_index("parameter")["q_value"].to_dict()
+        q_value = q_by_param.get(parameter, np.nan)
+        return parameter if not np.isfinite(q_value) else f"{parameter} (q={q_value:.3g})"
+
+    pairs = list(itertools.combinations(group_labels, 2))
+    q_texts = []
+    for group_a, group_b in pairs:
+        match = comparison_df[
+            (comparison_df["parameter"] == parameter)
+            & (comparison_df["group_a"] == group_a) & (comparison_df["group_b"] == group_b)
+        ]
+        if match.empty:
+            continue
+        q_value = match["q_value"].iloc[0]
+        q_str = f"{q_value:.3g}" if np.isfinite(q_value) else "n/a"
+        q_texts.append(q_str if len(pairs) == 1 else f"{group_a}-{group_b}: q={q_str}")
+
+    if not q_texts:
+        return parameter
+    if len(pairs) == 1:
+        return f"{parameter} (q={q_texts[0]})"
+    return f"{parameter}\n({', '.join(q_texts)})"
+
+
 def plot_parameter_comparisons(
     *,
     df: pd.DataFrame,
     group_col: str,
     parameters: Sequence[str],
     comparison_df: pd.DataFrame,
-    low_label: str,
-    high_label: str,
+    group_labels: Sequence[str],
     output_png: Path,
     output_pdf: Path,
 ) -> None:
     """Violin + individual-subject-point plots for each N2-C3 summary parameter.
 
-    One subplot per entry in ``parameters``; each subplot's title is annotated
-    with its FDR-adjusted q-value from ``comparison_df`` (md/group_analysis.md
-    Step 6). ``comparison_df`` must have ``parameter``/``q_value`` columns
-    (see ``infraslow.stats.group_comparison.compare_parameters``).
+    One subplot per entry in ``parameters``, one violin per entry in
+    ``group_labels`` (2 or more) within that subplot; each subplot's title is
+    annotated with its FDR-adjusted q-value(s) from ``comparison_df`` --
+    one q-value if ``group_labels`` has 2 entries, one per pairwise
+    comparison if it has more (md/group_analysis.md Step 6; see
+    :func:`_parameter_title`).
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -496,27 +550,26 @@ def plot_parameter_comparisons(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 4.2 * n_rows))
     axes = np.atleast_1d(axes).ravel()
 
-    q_by_param = comparison_df.set_index("parameter")["q_value"].to_dict()
+    colors = group_palette(len(group_labels))
     rng = np.random.default_rng(0)
 
     for ax, parameter in zip(axes, parameters):
-        low_vals = df.loc[df[group_col] == low_label, parameter].dropna().to_numpy(dtype=float)
-        high_vals = df.loc[df[group_col] == high_label, parameter].dropna().to_numpy(dtype=float)
+        group_values = [
+            df.loc[df[group_col] == label, parameter].dropna().to_numpy(dtype=float) for label in group_labels
+        ]
 
-        parts = ax.violinplot([low_vals, high_vals], showmedians=True)
-        for body, color in zip(parts["bodies"], (LOW_COLOR, HIGH_COLOR)):
+        parts = ax.violinplot(group_values, showmedians=True)
+        for body, color in zip(parts["bodies"], colors):
             body.set_facecolor(color)
             body.set_alpha(0.4)
 
-        for position, (values, color) in enumerate(((low_vals, LOW_COLOR), (high_vals, HIGH_COLOR)), start=1):
+        for position, (values, color) in enumerate(zip(group_values, colors), start=1):
             jitter = rng.normal(0, 0.04, size=values.size)
             ax.scatter(np.full(values.size, position) + jitter, values, color=color, s=10, alpha=0.5, zorder=3)
 
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels([low_label, high_label], fontsize=TICK_FONTSIZE)
-        q_value = q_by_param.get(parameter, np.nan)
-        title = parameter if not np.isfinite(q_value) else f"{parameter} (q={q_value:.3g})"
-        ax.set_title(title, fontsize=TITLE_FONTSIZE)
+        ax.set_xticks(range(1, len(group_labels) + 1))
+        ax.set_xticklabels(group_labels, fontsize=TICK_FONTSIZE)
+        ax.set_title(_parameter_title(parameter, comparison_df, group_labels), fontsize=TITLE_FONTSIZE)
         ax.tick_params(axis="y", labelsize=TICK_FONTSIZE)
         ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.25)
         ax.spines["top"].set_visible(False)
