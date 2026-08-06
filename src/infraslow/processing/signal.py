@@ -8,12 +8,10 @@ import mne
 import numpy as np
 import scipy.signal as signal
 
+from ..constants import DEFAULT_TARGET_SFREQ
 from .utils import is_nan
 
 logger = logging.getLogger(__name__)
-
-# Default common sampling rate (Hz) for resampling heterogeneous-rate channels.
-DEFAULT_TARGET_SFREQ = 128.0
 
 # Largest post-resample length mismatch (samples) tolerated across channels that
 # should share one recording duration, before a warning is logged.

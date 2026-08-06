@@ -9,8 +9,7 @@
 #SBATCH --mem=16G
 
 # Runs src/preprocessing.py over the whole valid Bioserenity cohort (every
-# subject with both an EDF and a Hypnodensity CSV -- same cohort discovery as
-# extract_features.py), channel C3 only, saving per-subject
+# subject with both an EDF and a Hypnodensity CSV), channel C3 only, saving per-subject
 # envelope/temporal_ISFS/bouts/ISFS-spectra trees to
 # ${OUTPUT_ROOT}/{subject_id}/C3/ (see preprocessing.py's module docstring for
 # the exact layout).

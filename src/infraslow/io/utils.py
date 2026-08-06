@@ -10,11 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-# Opening/decoding a .npz (or reading any per-subject file) is dominated by
-# Lustre I/O latency, not CPU, and a blocking read releases the GIL, so more
-# threads than cores still overlaps more latency -- matters once a caller is
-# loading a whole cohort (potentially 70k+ subject files).
-N_IO_WORKERS = min(32, len(os.sched_getaffinity(0)) * 4)
+from ..constants import N_IO_WORKERS
 
 
 def list_dir_filenames(directory: Path) -> set:

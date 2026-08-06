@@ -22,47 +22,24 @@ import scipy.signal as signal
 from scipy.optimize import curve_fit
 
 from .signal import ButterFilter
+from ..constants import (
+    DEFAULT_BASELINE_BAND,
+    DEFAULT_DELTA_BAND,
+    DEFAULT_INFRASLOW_BAND,
+    DEFAULT_ISFS_FILTER_ORDER,
+    DEFAULT_ISFS_LOWPASS_HZ,
+    DEFAULT_ISFS_MIN_EVENTS,
+    DEFAULT_ISFS_PERIOD,
+    DEFAULT_ISFS_TUKEY_ALPHA,
+    DEFAULT_SF_ENV,
+    DEFAULT_SIGMA_BAND,
+    DEFAULT_WINDOW_SEC,
+)
 
 # ``np.trapz`` is deprecated in NumPy 2.0 in favour of ``np.trapezoid``; use
 # whichever the installed NumPy provides.
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
-# Sigma (spindle) band the ISO sigma-power series is integrated over (Hz).
-# Matches the reference ``get_iso`` (Liu et al.), which uses 11-16 Hz for the
-# multitaper sigma-power estimate -- deliberately wider than the detector's
-# ``detection.spindles_detect`` ``freq_sp`` (12-15 Hz), as this is a power
-# integration, not a detection band.
-DEFAULT_SIGMA_BAND: Tuple[float, float] = (11.0, 16.0)
-DEFAULT_DELTA_BAND: Tuple[float, float] = (0.1, 4.0)
-# Infraslow band the sigma-power oscillation is expected to peak in (Hz).
-# Widened to 0.01-0.1 Hz (~10-100 s) around the canonical ~0.02 Hz (50 s)
-# sigma-power rhythm, so peak-finding and band power stay anchored to it while
-# capturing slower and faster infraslow components.
-DEFAULT_INFRASLOW_BAND: Tuple[float, float] = (0.01, 0.1)
-# (Hz). 1 Hz is far above the infraslow Nyquist (>0.1*2) and keeps the series compact.
-DEFAULT_SF_ENV: float = 1.0
-# Frequency-grid-spacing target (seconds) for the infraslow spectrum -- long enough to
-# resolve the 0.01 Hz lower edge of DEFAULT_INFRASLOW_BAND (0.01 Hz natural spacing at
-# 100 s; see infraslow_spectrum).
-DEFAULT_WINDOW_SEC: float = 100.0
-# Band (Hz) the bi-Gaussian ISFS fit (:func:`fit_isfs`) uses to estimate the
-# noise floor for its detection threshold and chromatogram baseline.
-DEFAULT_BASELINE_BAND: Tuple[float, float] = (0.06, 0.1)
-# -3 dB low-pass cutoff (Hz), Butterworth order, and Tukey taper fraction the
-# reference ``get_iso`` uses on the sigma-power course before its time-domain
-# ISFS check (:func:`isfs_lowpass`) -- peak/trough/zero-crossing scanning for a
-# 25-100 s cycle, independent of :func:`fit_isfs`'s frequency-domain estimate.
-DEFAULT_ISFS_LOWPASS_HZ: float = 0.04
-DEFAULT_ISFS_FILTER_ORDER: int = 5
-DEFAULT_ISFS_TUKEY_ALPHA: float = 0.1
-# Valid ISFS cycle period (s), matching the reference get_iso: two negative
-# zero-crossings 25-100 s apart (0.01-0.04 Hz), else "Not ISFS".
-DEFAULT_ISFS_PERIOD: Tuple[float, float] = (25.0, 100.0)
-# Minimum total event count (spindles, microarousals, slow waves, or slow-wave-
-# spindle coupling) the reference get_iso requires before reporting a
-# participant's phase-bin distribution (:func:`isfs_event_phase_distribution`);
-# below this the denominator is too small to be meaningful.
-DEFAULT_ISFS_MIN_EVENTS: int = 5
 # How much finer than window_sec's natural spacing infraslow_spectrum's frequency grid
 # is -- unlike an FFT-based method (Welch, multitaper), a Morlet wavelet transform gets
 # a real (not interpolated) value at any frequency we ask for, so raising this is just

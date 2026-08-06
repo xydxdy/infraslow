@@ -22,6 +22,8 @@ from typing import Tuple
 import numpy as np
 import pandas as pd
 
+from ..constants import HIGH_LABEL, LOW_LABEL, MID_LABEL, MIN_SUBJECTS_FOR_CUTOFF
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -32,11 +34,6 @@ __all__ = [
     "CutoffResult",
     "assign_spindle_rate_groups",
 ]
-
-LOW_LABEL = "low_spindle_rate"
-HIGH_LABEL = "high_spindle_rate"
-MID_LABEL = "mid_spindle_rate"
-MIN_SUBJECTS_FOR_CUTOFF = 2
 
 
 @dataclass

@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 
 import group_analysis as ga
-from infraslow.stats.group_comparison import OUTLIER_IQR_MULTIPLIER, compare_parameters
+from infraslow.constants import OUTLIER_IQR_MULTIPLIER
+from infraslow.stats.group_comparison import compare_parameters
 from infraslow.viz.group_analysis import group_palette
 
 VALIDATED_CSV = (

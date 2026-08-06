@@ -9,11 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-# --- Shared visual identity -------------------------------------------------
-# One seaborn context/style/palette for the whole viz layer.
-SEABORN_CONTEXT = "talk"
-SEABORN_STYLE = "whitegrid"
-SEABORN_PALETTE = "deep"
+from ..constants import SEABORN_CONTEXT, SEABORN_PALETTE, SEABORN_STYLE
 
 
 @contextmanager

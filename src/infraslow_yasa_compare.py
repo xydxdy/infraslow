@@ -38,10 +38,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from infraslow.io.utils import N_IO_WORKERS
+from infraslow.constants import DEFAULT_INFRASLOW_BAND as INFRASLOW_BAND, N_IO_WORKERS
 from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs
 from infraslow.processing.spindle import spindle_rate_per_min
-from infraslow.processing.subject_pipeline import INFRASLOW_BAND
 
 logger = logging.getLogger(__name__)
 

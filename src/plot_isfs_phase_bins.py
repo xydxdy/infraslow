@@ -45,22 +45,20 @@ from matplotlib.patches import Patch
 from scipy.signal import find_peaks
 
 from infraslow import BioserenityPSGLoader
-from infraslow.processing.spindle import (
-    spindles_detect,
-    _extract_epoch_stages,
-    _stages_to_int,
-    DEFAULT_STAGE_MAP,
+from infraslow.constants import (
     DEFAULT_EPOCH_SEC,
+    DEFAULT_ISFS_MIN_EVENTS,
+    DEFAULT_ISFS_PERIOD,
+    DEFAULT_SF_ENV,
+    DEFAULT_SIGMA_BAND,
+    DEFAULT_STAGE_MAP,
 )
+from infraslow.processing.spindle import spindles_detect, _extract_epoch_stages, _stages_to_int
 from infraslow.processing.infraslow import (
     eeg_envelope,
     isfs_lowpass,
     isfs_phase_bins,
     isfs_event_phase_distribution,
-    DEFAULT_SF_ENV,
-    DEFAULT_ISFS_PERIOD,
-    DEFAULT_SIGMA_BAND,
-    DEFAULT_ISFS_MIN_EVENTS,
 )
 
 logger = logging.getLogger(__name__)

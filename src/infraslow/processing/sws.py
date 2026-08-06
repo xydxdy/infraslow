@@ -56,28 +56,20 @@ from infraslow.processing.spindle import (
     _build_sample_hypno,
 )
 
+from ..constants import (
+    DEFAULT_AMP_NEG,
+    DEFAULT_AMP_POS,
+    DEFAULT_AMP_PTP,
+    DEFAULT_DUR_NEG,
+    DEFAULT_DUR_POS,
+    DEFAULT_FREQ_SW,
+    DEFAULT_H_TRANS_BANDWIDTH,
+)
+
 logger = logging.getLogger(__name__)
 
 # A YASA detection result, or ``None`` when no slow wave is found.
 SWResult = Optional[Any]
-
-# Detection thresholds passed to the vendored ``sw_detect``. Every value here
-# matches YASA's own default except ``DEFAULT_FREQ_SW``, which is this repo's
-# stated protocol ("EEG signals were bandpass filtered between 0.1 and 4 Hz
-# [...]") rather than YASA's own default of (0.3, 1.5) Hz.
-DEFAULT_FREQ_SW: Tuple[float, float] = (0.1, 4.0)
-DEFAULT_DUR_NEG: Tuple[float, float] = (0.3, 1.5)
-DEFAULT_DUR_POS: Tuple[float, float] = (0.1, 1.0)
-DEFAULT_AMP_NEG: Tuple[float, float] = (40.0, 200.0)
-DEFAULT_AMP_POS: Tuple[float, float] = (10.0, 150.0)
-DEFAULT_AMP_PTP: Tuple[float, float] = (75.0, 350.0)
-
-# YASA hardcodes both transition bandwidths to 0.2 Hz. That stays the default
-# for the upper edge (4 Hz has plenty of headroom below Nyquist), but the
-# lower edge needs to shrink automatically once ``freq_sw[0]`` drops much
-# below 0.25 Hz, or MNE's stop-band computation (``freq_sw[0] -
-# l_trans_bandwidth``) goes negative and raises.
-DEFAULT_H_TRANS_BANDWIDTH: float = 0.2
 
 
 def _auto_l_trans_bandwidth(freq_lo: float) -> float:

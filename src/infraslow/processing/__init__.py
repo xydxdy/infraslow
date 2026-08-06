@@ -6,8 +6,10 @@
   (e.g. :func:`~infraslow.processing.spindle.spindles_detect`) via YASA.
 * :mod:`~infraslow.processing.infraslow` — infraslow (~0.02 Hz) sigma-power
   oscillation analysis.
-* :mod:`~infraslow.processing.subject_pipeline` — per-subject sleep + infraslow
-  metrics pipeline (see ``src/run_all_metrics.py``).
+* :mod:`~infraslow.processing.utils` — small, generic building blocks (e.g.
+  :func:`~infraslow.processing.utils.find_stage_bouts`).
+
+Per-subject preprocessing itself lives in ``src/preprocessing.py``, not here.
 """
 
 from __future__ import annotations

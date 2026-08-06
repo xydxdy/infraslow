@@ -1,18 +1,29 @@
 """Default paths for locating Bioserenity pipeline inputs.
 
-Metadata CSVs are small and checked into the repo (``infraslow/metadata/``),
-so they no longer depend on ``$OAK`` being mounted. EDF/hypnodensity data is
-far too large to check in and stays on ``$OAK``.
+Re-exports the path constants from :mod:`infraslow.constants` (the single
+source of truth for every constant in the package) under their original
+names, so existing ``from infraslow.config import DEFAULT_METADATA``-style
+imports keep working unchanged.
 """
 
-from pathlib import Path
+from .constants import (
+    DEFAULT_DRUG_EXCLUDE_LIST,
+    DEFAULT_DRUG_METADATA,
+    DEFAULT_EDF_DIR,
+    DEFAULT_HYPNO_DIR,
+    DEFAULT_METADATA,
+    DEFAULT_METADATA2,
+    METADATA_DIR,
+    REPO_ROOT,
+)
 
-METADATA_DIR = Path(__file__).resolve().parent / "metadata"
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-DEFAULT_METADATA = str(METADATA_DIR / "Morpheus_Data_All5.csv")
-DEFAULT_METADATA2 = str(METADATA_DIR / "bioserenity_metadata3.csv")
-DEFAULT_DRUG_METADATA = str(METADATA_DIR / "drug_usage_metadata.csv")
-DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
-DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
-DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
+__all__ = [
+    "METADATA_DIR",
+    "REPO_ROOT",
+    "DEFAULT_METADATA",
+    "DEFAULT_METADATA2",
+    "DEFAULT_DRUG_METADATA",
+    "DEFAULT_EDF_DIR",
+    "DEFAULT_HYPNO_DIR",
+    "DEFAULT_DRUG_EXCLUDE_LIST",
+]

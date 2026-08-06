@@ -76,52 +76,47 @@ import numpy as np
 import pandas as pd
 
 from infraslow import BioserenityPSGLoader
-from infraslow.config import (
+from infraslow.constants import (
     DEFAULT_EDF_DIR,
+    DEFAULT_EEG_CHANNELS,
+    DEFAULT_EPOCH_SEC,
     DEFAULT_HYPNO_DIR,
     DEFAULT_METADATA,
     DEFAULT_METADATA2,
-)
-from infraslow.processing.spindle import (
-    DEFAULT_EEG_CHANNELS,
-    DEFAULT_EPOCH_SEC,
+    DEFAULT_SF_ENV,
     DEFAULT_STAGE_MAP,
-    _extract_epoch_stages,
-    _stages_to_int,
-    spindles_detect,
+    DEFAULT_SIGMA_BAND,
+    DEFAULT_DELTA_BAND,
+    DEFAULT_WINDOW_SEC,
 )
+from infraslow.processing.spindle import _extract_epoch_stages, _stages_to_int, spindles_detect
 from infraslow.processing.sws import sw_detect
-from infraslow.processing.subject_pipeline import (
+from infraslow.processing.utils import find_stage_bouts
+from infraslow.io.metadata import (
     combine_bioserenity_metadata,
-    find_stage_bouts,
     find_valid_bioserenity_subjects,
     load_bioserenity_metadata,
 )
-from infraslow.processing.infraslow import (
-    DEFAULT_SF_ENV,
-    eeg_envelope,
-    infraslow_spectrum,
-    isfs_lowpass,
-)
+from infraslow.processing.infraslow import eeg_envelope, infraslow_spectrum, isfs_lowpass
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Analysis constants -- matched to demo_infraslow_yasa_recheck.ipynb /
-# demo_infraslow_phase.ipynb (not subject_pipeline.py's slightly different
-# SF/SIGMA_BAND -- these two notebooks are this script's ground truth).
+# demo_infraslow_phase.ipynb (not the retired subject_pipeline.py's slightly
+# different SF/SIGMA_BAND -- these two notebooks are this script's ground truth).
 # --------------------------------------------------------------------------- #
 SF: float = 200.0                          # loader resample rate (Hz)
-SIGMA_BAND: Tuple[float, float] = (11.0, 16.0)
+SIGMA_BAND: Tuple[float, float] = DEFAULT_SIGMA_BAND
 # Standard delta band. Not computed anywhere else in this repo yet -- if your
 # reference analysis uses a different delta range, override via `bands=`.
-DELTA_BAND: Tuple[float, float] = (0.1, 4.0)
+DELTA_BAND: Tuple[float, float] = DEFAULT_DELTA_BAND
 BANDS: Dict[str, Tuple[float, float]] = {"sigma": SIGMA_BAND, "delta": DELTA_BAND}
 
 SF_ENV: float = DEFAULT_SF_ENV              # 1 Hz envelope rate
 EPOCH_SEC: float = DEFAULT_EPOCH_SEC         # 30 s scored epochs
 MIN_BOUT_SEC: float = 200.0                  # consecutive-stage bout length (s)
-WINDOW_SEC: float = 100.0                    # infraslow_spectrum's fixed freq-grid window
+WINDOW_SEC: float = DEFAULT_WINDOW_SEC       # infraslow_spectrum's fixed freq-grid window
 
 STAGE_CODES: Dict[str, Tuple[int, ...]] = {"N2": (2,), "N3": (3,)}
 DEFAULT_STAGES: Tuple[str, ...] = ("N2", "N3")
@@ -193,8 +188,8 @@ def parse_args() -> argparse.Namespace:
 def resolve_shard(cli_num_shards: Optional[int], cli_shard_index: Optional[int]) -> Tuple[int, int]:
     """``(num_shards, shard_index)``, defaulting to the Slurm array env vars when unset.
 
-    Mirrors ``extract_features.py``'s ``resolve_shard`` -- lets a job array
-    split the subject list across tasks with no explicit CLI flags at all.
+    Lets a job array split the subject list across tasks with no explicit CLI
+    flags at all.
     """
     num_shards = cli_num_shards
     if num_shards is None:
@@ -214,9 +209,9 @@ def resolve_shard(cli_num_shards: Optional[int], cli_shard_index: Optional[int])
 def list_valid_subjects(metadata_path: str, metadata2_path: str, edf_dir: str, hypno_dir: str) -> List[str]:
     """Every subject id with both an EDF and a Hypnodensity CSV, sorted.
 
-    Reuses ``subject_pipeline.py``'s own cohort-discovery (same two metadata
-    CSVs, same EDF/Hypnodensity directories) so "every subject" here means the
-    same cohort ``extract_features.py`` processes.
+    Reuses :mod:`infraslow.io.metadata`'s cohort-discovery (same two metadata
+    CSVs, same EDF/Hypnodensity directories) so "every subject" here means
+    every subject with usable data.
     """
     metadata = combine_bioserenity_metadata(
         load_bioserenity_metadata(Path(metadata_path)),
@@ -417,9 +412,7 @@ def preprocess_subject(
     The hypnogram comes from ``loader.annotations`` -- by default this is
     already sourced from the subject's Hypnodensity CSV (see
     :class:`~infraslow.io.psg_loader.BioserenityPSGLoader`'s default
-    ``annotation_loader``), the same source ``subject_pipeline.py``'s
-    cohort-scale run uses via ``load_hypnodensity_as_hypnogram`` -- not raw
-    EDF-embedded annotations.
+    ``annotation_loader``) -- not raw EDF-embedded annotations.
     """
     loader = BioserenityPSGLoader(
         subject_id=subject_id, sf=sf, requested_channels=list(channels)

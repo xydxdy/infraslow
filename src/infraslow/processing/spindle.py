@@ -22,32 +22,14 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple, Unio
 import numpy as np
 import pandas as pd
 
+from ..constants import (
+    DEFAULT_EEG_CHANNELS,
+    DEFAULT_EPOCH_SEC,
+    DEFAULT_STAGE_MAP,
+    NREM_STAGES,
+)
+
 logger = logging.getLogger(__name__)
-
-# YASA's integer sleep-stage convention (see ``yasa.hypno_str_to_int``):
-# -2=Unscored, -1=Artefact/Movement, 0=Wake, 1=N1, 2=N2, 3=N3, 4=REM.
-# NREM sleep is N1+N2+N3; sleep spindles are a hallmark of N2 (and present in
-# N3), so the NREM-only default mirrors the YASA notebook's ``include=(2, 3)``.
-NREM_STAGES: Tuple[int, ...] = (2, 3)
-
-# Default seconds per scored epoch. Bioserenity hypnodensity epochs are 30 s.
-DEFAULT_EPOCH_SEC = 30.0
-
-# Map the canonical stage labels this repo emits (Wake/N1/N2/N3/REM, see
-# ``infraslow.io.hypnodensity``) onto YASA's integer codes. Lookups are
-# case-insensitive; ``yasa.hypno_str_to_int`` covers the lowercase spellings,
-# but pinning the mapping here keeps the contract explicit and stable.
-DEFAULT_STAGE_MAP: Mapping[str, int] = {
-    "wake": 0,
-    "w": 0,
-    "n1": 1,
-    "n2": 2,
-    "n3": 3,
-    "rem": 4,
-    "r": 4,
-    "art": -1,
-    "uns": -2,
-}
 
 # A YASA detection result, or ``None`` when no spindle is found.
 SpindlesResult = Optional[Any]
@@ -262,15 +244,9 @@ def spindles_detect(
     return result
 
 
-# Suggested EEG channels to load for spindle work (used by the subject_pipeline
-# module; see infraslow.processing.subject_pipeline.CHANNELS).
-DEFAULT_EEG_CHANNELS: Tuple[str, ...] = ("F3", "F4", "C3", "C4", "O1", "O2")
-
-
 def spindle_rate_per_min(npz, channel: str) -> Tuple[float, float]:
     """``(rate, sem)`` spindles/min for ONE subject/channel, from
-    ``{channel}__bouts__n_spindles``/``__start``/``__stop`` (as written by
-    :func:`~infraslow.processing.subject_pipeline.calculate_channel_events`), or
+    ``{channel}__bouts__n_spindles``/``__start``/``__stop``, or
     ``(NaN, NaN)`` if there are no bouts for this channel.
 
     ``rate`` pools all of this subject's bouts into a single rate: total

@@ -63,6 +63,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..constants import BIOSERENITY_ALIAS_MAP
+
 logger = logging.getLogger(__name__)
 
 # Type aliases for the injectable LunaAPI touchpoints. Keeping them named
@@ -775,40 +777,3 @@ class BioserenityPSGLoader:
             return 0
         return int(self._data.shape[1])
 
-
-# Canonical alias map for the Bioserenity dataset. List order is priority order.
-BIOSERENITY_ALIAS_MAP: Dict[str, List[str]] = {
-    "F3": ["F3M2", "F3A2", "F3-M2", "EEG F3-A2", "FZM2", "FZA2", "FP1M2", "FP1A2", "F7M2", "F7A2", "F3:M2", "F3"],
-    "F4": ["F4M1", "F4A1", "F4-M1", "EEG F4-A1", "FZM2", "FZA2", "FP2M1", "FP2A1", "F8M1", "F8A1", "F4:M1", "F4"],
-    "C3": ["C3M2", "C3A2", "C3-M2", "EEG C3-A2", "C3M1", "CZM2", "C3:M2", "C3"],
-    "C4": ["C4M1", "C4A1", "C4-M1", "EEG C4-A1", "C4M2", "CZM2", "C4:M1", "C4"],
-    "O1": ["O1M2", "O1A2", "O1-M2", "EEG O1-A2", "O1M1", "O1:M2", "O1"],
-    "O2": ["O2M1", "O2A1", "O2-M1", "EEG O2-A1", "O2M2", "O2:M1", "O2"],
-    "A1A2": ["A1A2", "M1M2", "EEG A1-A2", "EEG M1-M2"],
-    "LEOG": ["LOC", "LEOG", "E1-M2", "EOG LOC-A2", "EOG1:M2", "E1"],
-    "REOG": ["ROC", "REOG", "E2-M2", "EOG ROC-A1", "EOG ROC-A2", "EOG2:M1", "E2"],
-    "Chin": ["Chin", "CHIN", "chin", "emg_Chin", "EMG", "CHINEMG", "ChinEMG", "EMG Chin", "Chin1-Chin2", "Chin 1-Chin 2", "ChinL", "Chin-L", "ChinR", "Chin-R"],
-    "ECG": ["ECG", "EKG", "ECG1-ECG2"],
-    "LLeg": ["LLeg", "LLEG", "emg_LLeg", "LEMG", "L EMG", "LLEGEMG", "LEG/L", "Left Leg", "L-Leg 1-L-Leg 2", "Leg-L", "Leg 1", "LAT", "Leg/L", "LEG1"],
-    "RLeg": ["RLeg", "RLEG", "emg_RLeg", "R EMG", "RLEGEMG", "LEG/R", "Right Leg", "R-Leg1-R-Leg2", "Leg-R", "Leg 2", "RAT", "Leg/R", "LEG2", "LEMG"],
-    "LArm": ["L-Arm", "ARMLeft", "LArm"],
-    "RArm": ["R-Arm", "ARMRight", "RArm"],
-    "PFlow": ["PFlo", "Pflo", "PFLO", "flow_PFlo", "PTAF", "Nasal Pressure", "PAP Flow", "Pflow", "PFlow", "Ptaf", "Flow Patient"],
-    "TFlow": ["TFlo", "Tflo", "TFLO", "flow_TFlo", "Flow", "Thermistor", "FLOW", "Thermist", "Airflow", "Therm", "Flow Patient"],
-    "CFlow": ["CFlo", "Cflo", "CFLO", "flow_CFlo", "VFLOW", "CFlow", "PAP Flow", "CPAP Flow", "Flow Patient"],
-    "Thorax": ["Tho", "THO", "Thorax", "Thor", "THOR", "Effort THO"],
-    "Abdomen": ["Abd", "ABD", "Abdomen", "Abdo", "ABDM", "Effort ABD"],
-    "SpO2": ["SpO2", "SAO2"],
-    "Snoring": ["SNOR", "Snore", "PSNO", "SNORE", "MICR", "Snoring", "Micr", "Micro", "Snoring Sensor"],
-    "Position": ["POS", "Body", "BODY", "Manual Pos", "ManPosition", "Body Position"],
-    "CPAP": ["CPAP", "VPAP", "CPress", "PAP Press", "CPAP Pressure", "PressCheck"],
-    "IPAP": ["IPAP", "xPAP IPAP", "CPAP IPAP"],
-    "EPAP": ["EPAP", "xPAP EPAP", "CPAP EPAP"],
-    "Leak": ["Leak", "PAP Leak", "Leak Total", "CPAP Leak", "LEAK"],
-    "PPG": ["PPG", "Pleth", "Plethysmogram"],
-    "Pulse": ["Pulse", "PulseRate", "PulseR", "PULSE", "HR"],
-    "RR": ["RR", "rr"],
-    "IntercostalEMG": ["ICOSEMG", "INT 1", "InterEMG", "EMG1", "INT"],
-    "Impedance": ["imp"],
-    "CO2": ["CO2", "pCo2", "EtCO2", "ECO2", "EtCO", "CO2_Flow", "tCO2", "mmHG", "mmHg"],
-}

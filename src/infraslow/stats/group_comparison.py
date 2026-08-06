@@ -15,6 +15,11 @@ from scipy import stats
 from statsmodels.stats.multitest import multipletests
 
 from .effect_sizes import hedges_g, rank_biserial_cliffs_delta
+from ..constants import (
+    MIN_N_FOR_DISTRIBUTION_CHECKS,
+    OUTLIER_IQR_MULTIPLIER,
+    SKEW_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +33,6 @@ __all__ = [
     "compare_parameter",
     "compare_parameters",
 ]
-
-#: |skewness| at/above this is "strongly skewed" -> prefer Mann-Whitney U.
-SKEW_THRESHOLD = 1.0
-#: a value farther than this many IQRs from the nearest quartile is an "extreme outlier".
-OUTLIER_IQR_MULTIPLIER = 3.0
-#: below this many finite values per group, skewness/outlier diagnostics are unreliable
-#: -> fall back to the distribution-free Mann-Whitney U rather than trusting them.
-MIN_N_FOR_DISTRIBUTION_CHECKS = 8
 
 
 def descriptive_stats(values: np.ndarray) -> Dict[str, float]:

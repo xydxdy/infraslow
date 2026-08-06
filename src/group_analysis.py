@@ -12,7 +12,7 @@ This script builds *subject-level* N2-C3 results on top of the same
 bi-Gaussian ISFS fit that ``infraslow_yasa_compare.py`` fits to the
 *cross-subject average* spectrum per stage/channel -- that script has no
 notion of a per-subject summary row. Per subject/channel/stage, the pipeline
-(``infraslow.processing.subject_pipeline``) writes only
+(``preprocessing.py``) writes only
 ``{channel}__spectra__freqs`` / ``{channel}__spectra__corr_mean`` (an
 already bout-averaged, baseline-corrected, unit-band-area relative spectrum --
 there is no separately-stored raw/baseline spectrum) plus that channel's bout
@@ -78,27 +78,25 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from infraslow.config import (  # noqa: E402
+from infraslow.constants import (  # noqa: E402
     DEFAULT_DRUG_EXCLUDE_LIST,
     DEFAULT_DRUG_METADATA,
+    DEFAULT_INFRASLOW_BAND as INFRASLOW_BAND,
     DEFAULT_METADATA,
     DEFAULT_METADATA2,
-)
-from infraslow.io.utils import N_IO_WORKERS  # noqa: E402
-from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs  # noqa: E402
-from infraslow.processing.spindle import spindle_rate_per_min  # noqa: E402
-from infraslow.processing.subject_pipeline import (  # noqa: E402
-    INFRASLOW_BAND,
-    combine_bioserenity_metadata,
-    load_bioserenity_metadata,
-)
-from infraslow.stats.group_assignment import (  # noqa: E402
     HIGH_LABEL,
     LOW_LABEL,
     MID_LABEL,
     MIN_SUBJECTS_FOR_CUTOFF,
-    assign_spindle_rate_groups,
+    N_IO_WORKERS,
 )
+from infraslow.processing.infraslow import bigaussian, chromatogram_peak_area, fit_isfs  # noqa: E402
+from infraslow.processing.spindle import spindle_rate_per_min  # noqa: E402
+from infraslow.io.metadata import (  # noqa: E402
+    combine_bioserenity_metadata,
+    load_bioserenity_metadata,
+)
+from infraslow.stats.group_assignment import assign_spindle_rate_groups  # noqa: E402
 from infraslow.stats.group_comparison import compare_parameters  # noqa: E402
 from infraslow.viz.group_analysis import (  # noqa: E402
     plot_cohort_infraslow_compare,
@@ -147,7 +145,7 @@ COMPARISON_PARAMETERS: List[str] = [
 PERIOD_FREQ_TOLERANCE = 1e-6
 #: Floating-point tolerance for matching --dominant-freq-hz against dominant_freq_hz --
 #: both sit on the same fixed Welch grid, so this only needs to absorb float noise, not
-#: bridge distinct grid points (spacing 1/WINDOW_SEC = 0.01 Hz, see subject_pipeline.py).
+#: bridge distinct grid points (spacing 1/WINDOW_SEC = 0.01 Hz, see preprocessing.py).
 DOMINANT_FREQ_TOLERANCE = 1e-6
 
 #: Metadata CSVs consulted for drug-usage flag columns (see
@@ -272,9 +270,8 @@ DEMOGRAPHIC_METADATA_PATHS: Tuple[str, ...] = (DEFAULT_METADATA, DEFAULT_METADAT
 
 def load_subject_demographics(metadata_paths: Sequence[str] = DEMOGRAPHIC_METADATA_PATHS) -> pd.DataFrame:
     """Combined ``ID, Age, Gender, BMI`` across ``metadata_paths`` (one row per
-    distinct ``ID``; see :func:`~infraslow.processing.subject_pipeline.
-    load_bioserenity_metadata`/:func:`~infraslow.processing.subject_pipeline.
-    combine_bioserenity_metadata`)."""
+    distinct ``ID``; see :func:`~infraslow.io.metadata.load_bioserenity_metadata`/
+    :func:`~infraslow.io.metadata.combine_bioserenity_metadata`)."""
     frames = [load_bioserenity_metadata(Path(p)) for p in metadata_paths if Path(p).is_file()]
     if not frames:
         raise SystemExit(f"No demographic metadata file found among: {list(metadata_paths)}")
@@ -393,7 +390,7 @@ def _load_subject_record(npz_path: Path, stage: str, channel: str, rate_unit: st
 
             record["freqs"], record["corr_mean"] = freqs, corr_mean
             # The subject's own dominant infraslow peak: the frequency bin (on the
-            # fixed Welch grid, see infraslow.processing.subject_pipeline.WINDOW_SEC)
+            # fixed Welch grid, see preprocessing.py's WINDOW_SEC)
             # with the highest baseline-corrected relative power -- independent of
             # whether the bi-Gaussian fit below succeeds, unlike peak_freq_hz.
             record["dominant_freq_hz"] = float(freqs[int(np.argmax(corr_mean))])

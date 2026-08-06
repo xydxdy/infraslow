@@ -19,9 +19,11 @@ from typing import Any, Callable, List, Mapping, Optional, Union
 
 import pandas as pd
 
-DEFAULT_TIMESTAMP_COLUMN = "Timestamp"
-DEFAULT_STAGING_DIRNAME = "Sleep_Staging"
-DEFAULT_HYPNODENSITY_SUFFIX = "_Hypnodensity.csv"
+from ..constants import (
+    DEFAULT_HYPNODENSITY_SUFFIX,
+    DEFAULT_STAGING_DIRNAME,
+    DEFAULT_TIMESTAMP_COLUMN,
+)
 
 
 def hypnodensity_to_annotations(

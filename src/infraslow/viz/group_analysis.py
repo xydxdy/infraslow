@@ -23,6 +23,20 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from ..constants import (
+    ALL_COLOR,
+    ANNOTATION_FONTSIZE,
+    HIGH_COLOR,
+    LABEL_FONTSIZE,
+    LEGEND_FONTSIZE,
+    LOW_COLOR,
+    MID_COLOR,
+    SUBJECT_COLOR,
+    SUPTITLE_FONTSIZE,
+    TICK_FONTSIZE,
+    TITLE_FONTSIZE,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -41,21 +55,6 @@ __all__ = [
     "plot_cohort_spectrum_clean",
     "plot_parameter_distributions",
 ]
-
-LOW_COLOR = "#1f77b4"
-HIGH_COLOR = "#d62728"
-MID_COLOR = "#7f7f7f"
-#: Whole-cohort ("before" any low/high split) curve/violin color.
-ALL_COLOR = "#2ca02c"
-#: Individual-subject line color -- matches infraslow_yasa_compare.py's SUBJ_COLOR.
-SUBJECT_COLOR = "0.6"
-
-TITLE_FONTSIZE = 12
-LABEL_FONTSIZE = 10
-TICK_FONTSIZE = 9
-LEGEND_FONTSIZE = 8
-ANNOTATION_FONTSIZE = 8
-SUPTITLE_FONTSIZE = 15
 
 
 def group_palette(n: int) -> List[str]:

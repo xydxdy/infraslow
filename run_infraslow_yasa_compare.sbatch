@@ -17,8 +17,8 @@
 # values directly in this file to change them.
 # Run `python3 demo_infraslow_yasa_compare.py --help` for what each flag does.
 #
-# Logs go to $SCRATCH (not $HOME/logs like run_extract_featuress.sbatch) since
-# this can be resubmitted often during iteration and $HOME's 15 GB quota is easy
+# Logs go to $SCRATCH (not $HOME/logs) since this can be resubmitted often
+# during iteration and $HOME's 15 GB quota is easy
 # to fill with accumulated run logs. Loading progress (per-stage, logged every
 # 1000 npz files) is written to {OUTPUT_DIR}/progress.log as well as this file --
 # tail -f it to watch a running job:
