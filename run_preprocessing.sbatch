@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=16G
+#SBATCH --mem=32G
 
 # Runs src/scripts/preprocessing.py over the whole valid Bioserenity cohort (every
 # subject with both an EDF and a Hypnodensity CSV), channel C3 only, saving per-subject

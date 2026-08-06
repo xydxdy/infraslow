@@ -1,7 +1,7 @@
 """Every constant used across the :mod:`infraslow` package, in one place.
 
 Grouped by the concern each constant serves (paths, I/O, per-stage signal
-processing, stats, viz) rather than by which module originally defined it.
+processing, viz) rather than by which module originally defined it.
 Each owning submodule re-exports its constants from here (``from ..constants
 import X``) so existing call sites (``infraslow.config.DEFAULT_METADATA``,
 ``infraslow.processing.infraslow.DEFAULT_SIGMA_BAND``, ...) keep working
@@ -201,47 +201,11 @@ DEFAULT_ISFS_MIN_EVENTS: int = 5
 
 
 # --------------------------------------------------------------------------- #
-# Stats -- spindle-rate group assignment (see infraslow.stats.group_assignment).
-# --------------------------------------------------------------------------- #
-LOW_LABEL = "low_spindle_rate"
-HIGH_LABEL = "high_spindle_rate"
-MID_LABEL = "mid_spindle_rate"
-MIN_SUBJECTS_FOR_CUTOFF = 2
-
-
-# --------------------------------------------------------------------------- #
-# Stats -- group comparison (see infraslow.stats.group_comparison).
-# --------------------------------------------------------------------------- #
-#: |skewness| at/above this is "strongly skewed" -> prefer Mann-Whitney U.
-SKEW_THRESHOLD = 1.0
-#: a value farther than this many IQRs from the nearest quartile is an "extreme outlier".
-OUTLIER_IQR_MULTIPLIER = 3.0
-#: below this many finite values per group, skewness/outlier diagnostics are unreliable
-#: -> fall back to the distribution-free Mann-Whitney U rather than trusting them.
-MIN_N_FOR_DISTRIBUTION_CHECKS = 8
-
-
-# --------------------------------------------------------------------------- #
 # Viz -- shared visual identity across infraslow.viz.
 # --------------------------------------------------------------------------- #
 SEABORN_CONTEXT = "talk"
 SEABORN_STYLE = "whitegrid"
 SEABORN_PALETTE = "deep"
-
-LOW_COLOR = "#1f77b4"
-HIGH_COLOR = "#d62728"
-MID_COLOR = "#7f7f7f"
-#: Whole-cohort ("before" any low/high split) curve/violin color.
-ALL_COLOR = "#2ca02c"
-#: Individual-subject line color -- matches infraslow_yasa_compare.py's SUBJ_COLOR.
-SUBJECT_COLOR = "0.6"
-
-TITLE_FONTSIZE = 12
-LABEL_FONTSIZE = 10
-TICK_FONTSIZE = 9
-LEGEND_FONTSIZE = 8
-ANNOTATION_FONTSIZE = 8
-SUPTITLE_FONTSIZE = 15
 
 
 __all__ = [
@@ -261,12 +225,6 @@ __all__ = [
     "DEFAULT_WINDOW_SEC", "DEFAULT_BASELINE_BAND", "DEFAULT_ISFS_LOWPASS_HZ",
     "DEFAULT_ISFS_FILTER_ORDER", "DEFAULT_ISFS_TUKEY_ALPHA",
     "DEFAULT_ISFS_PERIOD", "DEFAULT_ISFS_MIN_EVENTS",
-    # Stats
-    "LOW_LABEL", "HIGH_LABEL", "MID_LABEL", "MIN_SUBJECTS_FOR_CUTOFF",
-    "SKEW_THRESHOLD", "OUTLIER_IQR_MULTIPLIER", "MIN_N_FOR_DISTRIBUTION_CHECKS",
     # Viz
     "SEABORN_CONTEXT", "SEABORN_STYLE", "SEABORN_PALETTE",
-    "LOW_COLOR", "HIGH_COLOR", "MID_COLOR", "ALL_COLOR", "SUBJECT_COLOR",
-    "TITLE_FONTSIZE", "LABEL_FONTSIZE", "TICK_FONTSIZE", "LEGEND_FONTSIZE",
-    "ANNOTATION_FONTSIZE", "SUPTITLE_FONTSIZE",
 ]
