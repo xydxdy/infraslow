@@ -14,10 +14,13 @@
 # ${OUTPUT_ROOT}/{subject_id}/C3/ (see preprocessing.py's module docstring for
 # the exact layout).
 #
-# Submitted as a 1000-way job array so preprocessing.py's own --num-shards/
-# --shard-index (defaulting from $SLURM_ARRAY_TASK_COUNT/$SLURM_ARRAY_TASK_ID
-# when no --subject is given) split the cohort into 1000 disjoint pieces, one
-# per array task -- no NUM_SHARDS/SHARD_INDEX exports needed for this:
+# Submitted as a 1000-way job array so preprocessing.py's --num-shards/
+# --shard-index split the cohort into 1000 disjoint pieces, one per array
+# task. --num-shards defaults to $SLURM_ARRAY_TASK_COUNT (the size of *this*
+# array), which only equals the original shard count for a contiguous
+# 0-999 array -- resubmitting a subset of indices (e.g. run_unfinished.sh)
+# must export NUM_SHARDS=1000 explicitly so shard indices still map back to
+# the original 1000-way split instead of the resubmitted task count:
 #
 #   sbatch --array=0-999 run_preprocessing.sbatch
 #
@@ -58,5 +61,7 @@ cd /home/users/chaisaen/infraslow/src
 
 python3 preprocessing.py \
     --channels ${CHANNELS} \
+    --num-shards "${NUM_SHARDS:-$SLURM_ARRAY_TASK_COUNT}" \
+    --shard-index "${SLURM_ARRAY_TASK_ID}" \
     --output-dir "${OUTPUT_ROOT}" \
     ${LIMIT:+--limit "${LIMIT}"}
