@@ -21,7 +21,10 @@ Every parameter can be set via CLI flag or equivalent env var (CLI wins if both 
 given): --subject/SUBJECT, --channel/CHANNEL, --sf/SF, --min-bout-sec/MIN_BOUT_SEC,
 --window-sec/WINDOW_SEC, --output-dir/OUTPUT_DIR. Run `--help` for details.
 
-Run via Slurm, not the login node, e.g.:
+Run via Slurm, not the login node, from this file's own directory
+(``src/scripts/``) with ``src/`` on ``PYTHONPATH`` so ``infraslow`` resolves
+(the package is not pip-installed), e.g.:
+    export PYTHONPATH=/home/users/chaisaen/infraslow/src
     srun -p normal --time=00:15:00 --mem=4G --cpus-per-task=1 \\
         python3 plot_isfs_phase_bins.py --subject 318679
 

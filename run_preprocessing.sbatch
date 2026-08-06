@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
 
-# Runs src/preprocessing.py over the whole valid Bioserenity cohort (every
+# Runs src/scripts/preprocessing.py over the whole valid Bioserenity cohort (every
 # subject with both an EDF and a Hypnodensity CSV), channel C3 only, saving per-subject
 # envelope/temporal_ISFS/bouts/ISFS-spectra trees to
 # ${OUTPUT_ROOT}/{subject_id}/C3/ (see preprocessing.py's module docstring for
@@ -57,7 +57,8 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-cd /home/users/chaisaen/infraslow/src
+cd /home/users/chaisaen/infraslow/src/scripts
+export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
 python3 preprocessing.py \
     --channels ${CHANNELS} \

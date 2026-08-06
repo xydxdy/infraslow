@@ -52,8 +52,11 @@ only saved once per ``envelope``/``temporal_ISFS`` file (not per bout): it is
 fully reconstructable from a bout's own ``(start, stop)`` in ``bouts.npz`` plus
 ``SF_ENV``, so storing it per bout would just be duplicate data.
 
-Run via Slurm, not the login node. Single-subject dry run::
+Run via Slurm, not the login node, from this file's own directory
+(``src/scripts/``) with ``src/`` on ``PYTHONPATH`` so ``infraslow`` resolves
+(the package is not pip-installed). Single-subject dry run::
 
+    export PYTHONPATH=/home/users/chaisaen/infraslow/src
     srun -p normal --time=00:30:00 --mem=8G --cpus-per-task=1 \\
         python3 preprocessing.py --subject 318679 --channels C3 --output-dir $SCRATCH/data_v3
 

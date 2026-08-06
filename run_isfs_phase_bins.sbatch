@@ -31,7 +31,8 @@ OUTPUT_DIR=$SCRATCH/infraslow_outputs/isfs_phase_bins
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate infraslow-py310
 
-cd /home/users/chaisaen/infraslow/src
+cd /home/users/chaisaen/infraslow/src/scripts
+export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
 python3 plot_isfs_phase_bins.py \
     --subject "$SUBJECT" \

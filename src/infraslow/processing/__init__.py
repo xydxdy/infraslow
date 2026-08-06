@@ -9,7 +9,7 @@
 * :mod:`~infraslow.processing.utils` — small, generic building blocks (e.g.
   :func:`~infraslow.processing.utils.find_stage_bouts`).
 
-Per-subject preprocessing itself lives in ``src/preprocessing.py``, not here.
+Per-subject preprocessing itself lives in ``src/scripts/preprocessing.py``, not here.
 """
 
 from __future__ import annotations
