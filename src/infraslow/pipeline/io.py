@@ -109,7 +109,7 @@ def load_sleep_statistics(path: Path) -> pd.DataFrame:
     """
     try:
         df = pd.read_csv(path)
-    except (FileNotFoundError, OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+    except (FileNotFoundError, OSError, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError):
         return pd.DataFrame({"id": pd.Series(dtype=str)})
     if "id" not in df.columns:
         return pd.DataFrame({"id": pd.Series(dtype=str)})

@@ -84,3 +84,12 @@ def test_load_sleep_statistics_corrupt_file_returns_empty(tmp_path):
     path.write_text("not,a,valid\ncsv{{{")
     df = pio.load_sleep_statistics(path)
     assert "id" in df.columns
+
+
+def test_load_sleep_statistics_non_utf8_bytes_returns_empty(tmp_path):
+    path = tmp_path / "sleep_statistics.csv"
+    # Write invalid UTF-8 bytes (simulating a file being concurrently written with partial/corrupt data)
+    path.write_bytes(b"id,TST\n\xff\xfe,400\n")
+    df = pio.load_sleep_statistics(path)
+    assert list(df.columns) == ["id"]
+    assert len(df) == 0
