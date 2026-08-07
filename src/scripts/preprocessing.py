@@ -22,9 +22,10 @@ Everything else -- bout-finding, per-bout spindle counts, per-bout
 :func:`~infraslow.processing.infraslow.infraslow_spectrum` -- is genuinely
 per-stage (N2, N3) and is computed by slicing those two whole-night arrays.
 
-Saved layout (one ``<output-dir>/<subject>/<channel>/`` tree per subject/channel)::
+Saved layout (one ``<output-dir>/data/<subject>/<channel>/`` tree per
+subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
 
-    <subject>/<channel>/
+    data/<subject>/<channel>/
         envelope/
             sigma.npz             # t_env, power -- whole night
             delta.npz
@@ -58,7 +59,7 @@ Run via Slurm, not the login node, from this file's own directory
 
     export PYTHONPATH=/home/users/chaisaen/infraslow/src
     srun -p normal --time=00:30:00 --mem=8G --cpus-per-task=1 \\
-        python3 preprocessing.py --subject 318679 --channels C3 --output-dir $SCRATCH/data_v3
+        python3 preprocessing.py --subject 318679 --channels C3 --output-dir $SCRATCH/processed_data
 
 Whole cohort, split across a job array (``--num-shards``/``--shard-index``
 default from ``$SLURM_ARRAY_TASK_COUNT``/``$SLURM_ARRAY_TASK_ID`` when a
@@ -124,6 +125,12 @@ WINDOW_SEC: float = DEFAULT_WINDOW_SEC       # infraslow_spectrum's fixed freq-g
 STAGE_CODES: Dict[str, Tuple[int, ...]] = {"N2": (2,), "N3": (3,)}
 DEFAULT_STAGES: Tuple[str, ...] = ("N2", "N3")
 DEFAULT_CHANNELS: Tuple[str, ...] = DEFAULT_EEG_CHANNELS
+
+# Subdirectories of --output-dir: per-subject trees under DATA_DIRNAME, shard/
+# progress logs under LOGS_DIRNAME -- kept apart so a directory listing of one
+# never has to skip over 100k+ entries of the other.
+DATA_DIRNAME: str = "data"
+LOGS_DIRNAME: str = "logs"
 
 # Minimal columns guaranteed present in spindel_yasa.csv even when zero
 # spindles are detected (a real detection's summary() has YASA's full schema;
@@ -347,7 +354,7 @@ def preprocess_channel(
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
 ) -> None:
     """Compute and save every artifact for one subject/channel (see module docstring)."""
-    ch_dir = output_dir / subject_id / channel
+    ch_dir = output_dir / DATA_DIRNAME / subject_id / channel
     (ch_dir / "envelope").mkdir(parents=True, exist_ok=True)
     (ch_dir / "temporal_ISFS").mkdir(parents=True, exist_ok=True)
 
@@ -442,11 +449,13 @@ def main() -> None:
     # Shard resolution happens before logging setup so each shard gets its own
     # log file -- a thousand array tasks all appending to one shared
     # progress.log would interleave/contend on the same file.
+    logs_dir = args.output_dir / LOGS_DIRNAME
     if args.subject:
-        log_path = args.output_dir / "progress.log"
+        log_path = logs_dir / "progress.log"
     else:
         num_shards, shard_index = resolve_shard(args.num_shards, args.shard_index)
-        log_path = args.output_dir / f"progress_shard{shard_index}.log"
+        log_path = logs_dir / f"progress_shard{shard_index}.log"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -477,7 +486,7 @@ def main() -> None:
                 subject_id, args.output_dir, sf=args.sf, channels=args.channels,
                 stages=args.stages, min_bout_sec=args.min_bout_sec, window_sec=args.window_sec,
             )
-            logger.info(f"done: subject={subject_id} -> {args.output_dir / subject_id}")
+            logger.info(f"done: subject={subject_id} -> {args.output_dir / DATA_DIRNAME / subject_id}")
         except Exception:  # noqa: BLE001 - one bad subject must not sink the shard
             logger.exception(f"Subject {subject_id} failed")
 
