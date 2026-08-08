@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import pandas as pd
 
 from ..constants import DEFAULT_METADATA, DEFAULT_METADATA2, DEFAULT_MIN_BOUT_SEC
 from . import features as pft
@@ -30,7 +31,7 @@ _SPECTRUM_VALUE_COLS = [
     "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc", "chromatogram_peak_area",
     "bi_gaussian_amp", "bi_gaussian_mu", "bi_gaussian_sd_l", "bi_gaussian_sd_r",
 ]
-_PHASE_VALUE_COLS = ["event_count", "mean_phase", "resultant_length"]
+_PHASE_VALUE_COLS = ["event_count", "resultant_length"]
 _FEATURE_VALUE_COLS = [
     "spindle_count", "spindle_density_per_min", "slow_wave_count", "slow_wave_density_per_min",
     "sigma_power_db", "delta_power_db",
@@ -120,7 +121,7 @@ def run_subject_state_channel(
         for band in _BANDS:
             b_t_env, b_power = pio.load_envelope(subject_dir, channel, band)
             band_feats.update(pft.compute_band_power_feature(b_t_env, b_power, bouts["all"], name=band))
-    except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - one bad subject/channel/state must not sink the whole run
         logger.exception("subject=%s channel=%s state=%s failed", subject_id, channel, state)
         failure = dict(subject_id=subject_id, sleep_state=state, channel=channel,
                         stage="features", error=str(exc))
@@ -172,7 +173,14 @@ def run_pipeline(config: PipelineConfig) -> None:
     example_spectrum_by_state: Dict[str, Tuple[dict, dict]] = {}
 
     for subject_id in subjects:
-        for channel in _discover_channels(config, subject_id):
+        try:
+            channels = _discover_channels(config, subject_id)
+        except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+            logger.exception("subject=%s channel discovery failed", subject_id)
+            failures.append(dict(subject_id=subject_id, sleep_state=None, channel=None,
+                                  stage="channels", error=str(exc)))
+            continue
+        for channel in channels:
             for state in config.sleep_states:
                 record, brecs, failure, curves = run_subject_state_channel(
                     config.data_dir, subject_id, channel, state, return_curves=True,
@@ -192,6 +200,17 @@ def run_pipeline(config: PipelineConfig) -> None:
                     if state not in example_spectrum_by_state and not np.isnan(record.get("peak_freq_hz", np.nan)):
                         example_spectrum_by_state[state] = (record, curves)
 
+    # Pool each state's per-subject phase distributions once here (not per
+    # figure) so the circular cohort-mean-phase row below and the Figure 3
+    # phase-bin bar chart later both use the exact same pooled counts.
+    pooled_by_state: Dict[str, dict] = {}
+    for state in config.sleep_states:
+        if phase_dists_by_state[state]:
+            pooled_by_state[state] = pph.pool_phase_distributions(phase_dists_by_state[state])
+        else:
+            pooled_by_state[state] = dict(event_count=0, n_in_isfs=0, phase_bin_counts=[0] * 8,
+                                           phase_bin_rates=[0.0] * 8)
+
     subject_state_df = prep.build_subject_state_features_df(subject_state_records)
     demographics = pio.load_demographics(config.metadata_path, config.metadata2_path)
     sleep_stats = pio.load_sleep_statistics(config.sleep_statistics_path)
@@ -203,7 +222,36 @@ def run_pipeline(config: PipelineConfig) -> None:
 
     value_cols = [c for c in (_SPECTRUM_VALUE_COLS + _PHASE_VALUE_COLS + _FEATURE_VALUE_COLS)
                   if c in subject_state_df.columns]
-    summary_df = prep.cohort_summary(subject_state_df, value_cols=value_cols)
+    summary_df = prep.cohort_summary(subject_state_df, group_col=["sleep_state", "channel"], value_cols=value_cols)
+
+    # mean_phase/preferred_phase are circular quantities (angles in (-pi, pi]) -- a
+    # linear mean/std across subjects (what cohort_summary computes for every other
+    # value_col) is not meaningful for them and is deliberately excluded from
+    # _PHASE_VALUE_COLS above. Instead, add one circular-mean-phase row per state,
+    # computed from the pooled (cross-subject, cross-channel) 8-bin phase-bin counts
+    # via the standard mean-resultant-vector formula: weighted resultant
+    # C = sum(c_i * cos(angle_i)), S = sum(c_i * sin(angle_i)), circular mean =
+    # atan2(S, C). channel="ALL" marks this as a cross-channel pooled statistic
+    # (phase distributions are already pooled across channels by design elsewhere
+    # in this module); states with zero pooled in-cycle events are skipped.
+    bin_angles = pph.bin_center_angle(np.arange(1, 9))
+    circular_rows = []
+    for state in config.sleep_states:
+        pooled = pooled_by_state[state]
+        n_in_isfs = int(pooled["n_in_isfs"])
+        if n_in_isfs == 0:
+            continue
+        counts = np.asarray(pooled["phase_bin_counts"], dtype=float)
+        c = float((counts * np.cos(bin_angles)).sum())
+        s = float((counts * np.sin(bin_angles)).sum())
+        circular_rows.append(dict(
+            sleep_state=state, channel="ALL", variable="cohort_mean_phase_circular",
+            n=n_in_isfs, mean=float(np.arctan2(s, c)),
+            std=np.nan, sem=np.nan, median=np.nan, q25=np.nan, q75=np.nan, min=np.nan, max=np.nan,
+        ))
+    if circular_rows:
+        summary_df = pd.concat([summary_df, pd.DataFrame(circular_rows)], ignore_index=True)
+
     prep.write_csv(summary_df, config.output_dir / "cohort_summary.csv")
 
     prep.write_csv(prep.build_bout_features_df(failures), config.output_dir / "failures.csv")
@@ -213,10 +261,7 @@ def run_pipeline(config: PipelineConfig) -> None:
         pfg.plot_peak_frequency_distribution(
             peaks, state=state, out_path=config.output_dir / "figures" / f"{state}_peak_frequency_distribution.png",
         )
-        if phase_dists_by_state[state]:
-            pooled = pph.pool_phase_distributions(phase_dists_by_state[state])
-        else:
-            pooled = dict(event_count=0, n_in_isfs=0, phase_bin_counts=[0] * 8, phase_bin_rates=[0.0] * 8)
+        pooled = pooled_by_state[state]
         pfg.plot_spindle_phase_distribution(
             pooled, state=state, out_path=config.output_dir / "figures" / f"{state}_spindle_phase_distribution.png",
         )

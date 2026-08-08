@@ -62,3 +62,42 @@ def test_compute_band_power_feature_no_bouts_is_nan(fake_subject_tree):
     t_env, power = pio.load_envelope(subject_dir, "C3", "delta")
     feats = pft.compute_band_power_feature(t_env, power, np.empty((0, 2)), name="delta")
     assert np.isnan(feats["delta_power_db"])
+
+
+def test_compute_spindle_features_excludes_events_outside_bouts(fake_subject_tree):
+    # preprocessing.py runs spindle detection over the whole night per stage, not
+    # scoped to the >=200s bouts pipeline.py selects features from -- a phantom
+    # spindle whose Peak falls in the gap between two bouts (350-450s, between the
+    # fixture's bout 1 [50, 350) and bout 2 [450, 750)) must not be counted.
+    import pandas as pd
+
+    subject_dir = fake_subject_tree / "SUBJ001"
+    summary = pio.load_spindle_summary(subject_dir, "C3", "N2")
+    bouts = pio.load_stage_bouts(subject_dir, "C3", "N2")
+    baseline = pft.compute_spindle_features(summary, bouts["all"])
+
+    phantom = summary.iloc[[0]].copy()
+    phantom["Start"], phantom["Peak"], phantom["End"] = 399.0, 400.0, 401.0
+    summary_with_phantom = pd.concat([summary, phantom], ignore_index=True)
+
+    feats = pft.compute_spindle_features(summary_with_phantom, bouts["all"])
+    assert feats["spindle_count"] == baseline["spindle_count"] == 3
+    assert feats["spindle_density_per_min"] == pytest.approx(baseline["spindle_density_per_min"])
+
+
+def test_compute_slow_wave_features_excludes_events_outside_bouts(fake_subject_tree):
+    import pandas as pd
+
+    subject_dir = fake_subject_tree / "SUBJ001"
+    summary = pio.load_sw_summary(subject_dir, "C3", "N2")
+    bouts = pio.load_stage_sw_bouts(subject_dir, "C3", "N2")
+    baseline = pft.compute_slow_wave_features(summary, bouts["all"])
+
+    phantom = summary.iloc[[0]].copy()
+    phantom["Start"], phantom["NegPeak"] = 399.0, 400.0
+    phantom["PosPeak"], phantom["End"] = 400.6, 401.0
+    summary_with_phantom = pd.concat([summary, phantom], ignore_index=True)
+
+    feats = pft.compute_slow_wave_features(summary_with_phantom, bouts["all"])
+    assert feats["slow_wave_count"] == baseline["slow_wave_count"] == 3
+    assert feats["slow_wave_density_per_min"] == pytest.approx(baseline["slow_wave_density_per_min"])

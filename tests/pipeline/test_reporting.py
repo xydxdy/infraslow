@@ -61,6 +61,30 @@ def test_cohort_summary_long_form():
         assert col in out.columns
 
 
+def test_cohort_summary_group_col_list_keeps_channels_separate():
+    # subject_state_df has one row per (subject_id, sleep_state, channel) -- grouping
+    # by sleep_state alone (the old default) pools every channel's rows together as if
+    # they were independent observations of the same thing, inflating n and averaging
+    # unrelated measurements (e.g. C3 vs O2) together. group_col=["sleep_state",
+    # "channel"] must keep each channel's rows separate.
+    df = pd.DataFrame({
+        "sleep_state": ["N2", "N2", "N2", "N2"],
+        "channel": ["C3", "C3", "O2", "O2"],
+        "peak_freq_hz": [0.02, 0.022, 0.05, 0.052],
+    })
+    out = prep.cohort_summary(df, group_col=["sleep_state", "channel"], value_cols=["peak_freq_hz"])
+    assert len(out) == 2  # one row per (sleep_state, channel) pair, not pooled into one
+    assert set(out["channel"]) == {"C3", "O2"}
+
+    c3 = out[(out["sleep_state"] == "N2") & (out["channel"] == "C3")].iloc[0]
+    o2 = out[(out["sleep_state"] == "N2") & (out["channel"] == "O2")].iloc[0]
+    assert c3["n"] == 2
+    assert o2["n"] == 2
+    assert np.isclose(c3["mean"], np.mean([0.02, 0.022]))
+    assert np.isclose(o2["mean"], np.mean([0.05, 0.052]))
+    assert not np.isclose(c3["mean"], o2["mean"])
+
+
 def test_write_csv_creates_parent_dirs(tmp_path):
     df = pd.DataFrame({"a": [1, 2]})
     path = tmp_path / "nested" / "dir" / "out.csv"

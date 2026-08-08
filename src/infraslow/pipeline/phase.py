@@ -28,7 +28,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from ..constants import DEFAULT_ISFS_MIN_EVENTS, DEFAULT_ISFS_PERIOD
-from ..processing.infraslow import isfs_event_phase_distribution, isfs_phase_bins
+from ..processing.infraslow import (
+    _nearest_sample_index,
+    isfs_event_phase_distribution,
+    isfs_phase_bins,
+)
 
 
 def bin_center_angle(bin_idx) -> np.ndarray:
@@ -81,11 +85,9 @@ def compute_subject_phase_features(
     ts_per_bout = [t for t, _bins, _events in bouts_data]
     angles: List[float] = []
     for t, bins, events in zip(ts_per_bout, bins_per_bout, events_per_bout):
-        if events.size == 0:
+        if events.size == 0 or t.size == 0:
             continue
-        idx = np.clip(np.searchsorted(t, events), 0, t.size - 1)
-        left = np.clip(idx - 1, 0, t.size - 1)
-        idx = np.where(np.abs(t[left] - events) <= np.abs(t[idx] - events), left, idx)
+        idx = _nearest_sample_index(t, events)
         b = bins[idx]
         in_cycle = b > 0
         angles.extend(bin_center_angle(b[in_cycle]).tolist())

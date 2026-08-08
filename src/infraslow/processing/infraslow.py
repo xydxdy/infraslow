@@ -502,6 +502,22 @@ def isfs_phase_bins(
     return bins, cycles
 
 
+def _nearest_sample_index(t: np.ndarray, times: np.ndarray) -> np.ndarray:
+    """Index into `t` of the sample nearest each of `times` (searchsorted's
+    insertion index vs. its left neighbour, whichever is actually closer).
+
+    Shared by :func:`isfs_event_phase_distribution` and
+    `pipeline.phase.compute_subject_phase_features`, which both need to map
+    event onset times onto the nearest ISFS-phase-bin sample. Safe to call
+    with an empty `t` or `times` (both call sites already guard the zero
+    case before calling, but the helper itself does not assume it)."""
+    if t.size == 0 or times.size == 0:
+        return np.empty(0, dtype=int)
+    idx = np.clip(np.searchsorted(t, times), 0, t.size - 1)
+    left = np.clip(idx - 1, 0, t.size - 1)
+    return np.where(np.abs(t[left] - times) <= np.abs(t[idx] - times), left, idx)
+
+
 def isfs_event_phase_distribution(bouts_data, *, min_events: int = DEFAULT_ISFS_MIN_EVENTS):
     """Percentage distribution of event onsets across the 8 ISFS phase bins.
 
@@ -543,12 +559,7 @@ def isfs_event_phase_distribution(bouts_data, *, min_events: int = DEFAULT_ISFS_
         if event_times.size == 0 or t.size == 0:
             continue
 
-        # Nearest-sample lookup: searchsorted gives the insertion index, then pick
-        # whichever of it or its left neighbour is actually closer in time.
-        idx = np.clip(np.searchsorted(t, event_times), 0, t.size - 1)
-        left = np.clip(idx - 1, 0, t.size - 1)
-        idx = np.where(np.abs(t[left] - event_times) <= np.abs(t[idx] - event_times), left, idx)
-
+        idx = _nearest_sample_index(t, event_times)
         bins_for_events = phase_bins[idx]
         for b in range(1, 9):
             counts[b - 1] += int((bins_for_events == b).sum())

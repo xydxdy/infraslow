@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
+from infraslow.constants import DEFAULT_METADATA
 from infraslow.pipeline import io as pio
 
 
@@ -59,10 +63,15 @@ def test_load_spindle_summary_has_expected_columns(fake_subject_tree):
     assert {"Start", "Peak", "End"}.issubset(df.columns)
 
 
+@pytest.mark.skipif(
+    not Path(DEFAULT_METADATA).exists(),
+    reason="metadata CSVs are local-only, not checked into the repo",
+)
 def test_load_demographics_returns_id_age_gender_bmi():
     df = pio.load_demographics()
     assert list(df.columns) == ["ID", "Age", "Gender", "BMI"]
-    assert len(df) > 0  # real metadata CSVs are checked into the repo
+    assert len(df) > 0  # metadata CSVs are local-only (gitignored, not checked into the repo);
+    # this test only runs on a machine that happens to have them locally
 
 
 def test_load_sleep_statistics_missing_file_returns_empty_with_id_column(tmp_path):
