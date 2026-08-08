@@ -14,7 +14,7 @@ saves that exact subset). All fitting/integration math (`fit_isfs`,
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Tuple, Union
 
 import numpy as np
 
@@ -66,7 +66,8 @@ def _nan_spectrum_features() -> Dict[str, float]:
 def compute_subject_spectrum_features(
     freqs: np.ndarray, psds: np.ndarray, *,
     infraslow_band=DEFAULT_INFRASLOW_BAND, baseline_band=DEFAULT_BASELINE_BAND,
-) -> Dict[str, float]:
+    return_curves: bool = False,
+) -> Union[Dict[str, float], Tuple[Dict[str, float], Dict[str, np.ndarray]]]:
     """One subject/state/channel's spectrum features, from its selected bouts' PSDs.
 
     Mirrors the notebook exactly: `mean_psd` across the selected bouts ->
@@ -81,8 +82,17 @@ def compute_subject_spectrum_features(
     Returns an all-NaN, `isfs_detected=False` dict if `psds` has zero rows
     (this subject/state/channel had no spindle-containing bouts) -- the
     caller (pipeline.py) decides whether that means "state unavailable".
+
+    If `return_curves` is set, additionally returns a second dict with the
+    `freqs`/`rel`/`corrected` intermediate arrays (e.g. for figure plotting)
+    -- the plain-dict return stays the default so existing call sites are
+    unaffected.
     """
     if psds.shape[0] == 0:
+        if return_curves:
+            return _nan_spectrum_features(), dict(
+                freqs=freqs, rel=np.full_like(freqs, np.nan), corrected=np.full_like(freqs, np.nan),
+            )
         return _nan_spectrum_features()
 
     mean_psd = psds.mean(axis=0)
@@ -99,7 +109,7 @@ def compute_subject_spectrum_features(
     fitted_curve = bigaussian(fg, *fit["popt"])
     chrom = chromatogram_peak_area(fg, fitted_curve, threshold=fit["threshold"], infraslow_band=infraslow_band)
 
-    return dict(
+    feats = dict(
         peak_freq_hz=fit["mu"],
         peak_period_s=1.0 / fit["mu"],
         bandwidth_hz=fit["bandwidth"],
@@ -114,6 +124,9 @@ def compute_subject_spectrum_features(
         real_peak_freq_hz=real_peak_freq,
         real_peak_period_s=1.0 / real_peak_freq,
     )
+    if return_curves:
+        return feats, dict(freqs=freqs, rel=rel, corrected=corrected)
+    return feats
 
 
 def compute_bout_peak_freqs(

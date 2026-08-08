@@ -57,6 +57,19 @@ def test_compute_subject_spectrum_features_empty_psds_returns_nan_dict():
     assert np.isnan(feats["chromatogram_peak_area"])
 
 
+def test_compute_subject_spectrum_features_return_curves(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    bouts = pio.load_stage_bouts(subject_dir, "C3", "N2")
+    isfs = pio.load_stage_isfs_spectra(subject_dir, "C3", "N2", "sigma")
+    selected = psp.select_spindle_bouts(bouts, isfs)
+    feats, curves = psp.compute_subject_spectrum_features(
+        selected["freqs"], selected["psds"], return_curves=True,
+    )
+    assert curves["freqs"].shape == selected["freqs"].shape
+    assert curves["rel"].shape == selected["freqs"].shape
+    assert curves["corrected"].shape == selected["freqs"].shape
+
+
 def test_compute_bout_peak_freqs_shape(fake_subject_tree):
     subject_dir = fake_subject_tree / "SUBJ001"
     isfs = pio.load_stage_isfs_spectra(subject_dir, "C3", "N2", "sigma")

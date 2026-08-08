@@ -198,6 +198,12 @@ DEFAULT_ISFS_PERIOD: Tuple[float, float] = (25.0, 100.0)
 #: participant's phase-bin distribution (``isfs_event_phase_distribution``);
 #: below this the denominator is too small to be meaningful.
 DEFAULT_ISFS_MIN_EVENTS: int = 5
+#: Mirrors ``src/scripts/preprocessing.py``'s ``MIN_BOUT_SEC`` -- the minimum
+#: consecutive-stage bout length (s) preprocessing.py requires before it will
+#: ever write a bout to ``bouts.npz``. ``pipeline.py`` re-applies this as a
+#: defensive filter rather than blindly trusting that every upstream artifact
+#: satisfies the invariant.
+DEFAULT_MIN_BOUT_SEC: float = 200.0
 
 
 # --------------------------------------------------------------------------- #
@@ -224,7 +230,7 @@ __all__ = [
     "DEFAULT_DELTA_BAND", "DEFAULT_INFRASLOW_BAND", "DEFAULT_SF_ENV",
     "DEFAULT_WINDOW_SEC", "DEFAULT_BASELINE_BAND", "DEFAULT_ISFS_LOWPASS_HZ",
     "DEFAULT_ISFS_FILTER_ORDER", "DEFAULT_ISFS_TUKEY_ALPHA",
-    "DEFAULT_ISFS_PERIOD", "DEFAULT_ISFS_MIN_EVENTS",
+    "DEFAULT_ISFS_PERIOD", "DEFAULT_ISFS_MIN_EVENTS", "DEFAULT_MIN_BOUT_SEC",
     # Viz
     "SEABORN_CONTEXT", "SEABORN_STYLE", "SEABORN_PALETTE",
 ]
