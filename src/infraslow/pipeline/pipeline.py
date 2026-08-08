@@ -9,7 +9,7 @@ module itself does no signal processing and never re-runs detection.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -73,10 +73,10 @@ def run_subject_state_channel(
     state (`stage="bouts"`), matching the spec's "keep N2, report N3
     unavailable" requirement rather than writing a NaN-filled row.
 
-    When `return_curves` is set, a 4th element (the `freqs`/`rel`/`corrected`
-    intermediate spectrum arrays, or `None` when no record was produced) is
-    appended to the returned tuple; the default 3-tuple stays unchanged for
-    every existing caller."""
+    When `return_curves` is set, a 4th element (the `freqs`/`rel`/`corrected`/
+    `bout_peak_freqs` intermediate spectrum arrays, or `None` when no record
+    was produced) is appended to the returned tuple; the default 3-tuple
+    stays unchanged for every existing caller."""
     subject_dir = Path(data_dir) / subject_id
     try:
         bouts = pio.load_stage_bouts(subject_dir, channel, state)
@@ -149,6 +149,7 @@ def run_subject_state_channel(
             bout_start=float(a), bout_stop=float(b), bout_duration=float(b - a),
         ))
 
+    curves["bout_peak_freqs"] = bout_peak_freqs
     return (record, bout_records, None, curves) if return_curves else (record, bout_records, None)
 
 
@@ -181,6 +182,7 @@ def run_pipeline(config: PipelineConfig) -> None:
                 if record is not None:
                     subject_state_records.append(record)
                     bout_records.extend(brecs)
+                    bout_peaks_by_state[state].extend(curves["bout_peak_freqs"].tolist())
                     if record.get("phase_bin_counts") is not None:
                         phase_dists_by_state[state].append(dict(
                             event_count=record["event_count"], n_in_isfs=record["n_in_isfs"],
@@ -201,13 +203,7 @@ def run_pipeline(config: PipelineConfig) -> None:
 
     value_cols = [c for c in (_SPECTRUM_VALUE_COLS + _PHASE_VALUE_COLS + _FEATURE_VALUE_COLS)
                   if c in subject_state_df.columns]
-    if len(subject_state_df) and value_cols:
-        summary_df = prep.cohort_summary(subject_state_df, value_cols=value_cols)
-    else:
-        summary_df = prep.cohort_summary(
-            subject_state_df.assign(**{c: np.nan for c in value_cols}) if len(subject_state_df) else
-            subject_state_df, value_cols=value_cols,
-        ) if value_cols else prep.build_bout_features_df([])
+    summary_df = prep.cohort_summary(subject_state_df, value_cols=value_cols)
     prep.write_csv(summary_df, config.output_dir / "cohort_summary.csv")
 
     prep.write_csv(prep.build_bout_features_df(failures), config.output_dir / "failures.csv")

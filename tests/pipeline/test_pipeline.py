@@ -1,6 +1,7 @@
 # tests/pipeline/test_pipeline.py
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from infraslow.pipeline import pipeline as ppl
@@ -22,6 +23,22 @@ def test_run_subject_state_channel_n2_has_spindle_bouts(fake_subject_tree):
     for br in bout_records:
         assert br["sleep_state"] == "N2"
         assert br["channel"] == "C3"
+
+
+def test_run_subject_state_channel_return_curves_includes_bout_peak_freqs(fake_subject_tree):
+    # Figure 2 (N2/N3_peak_frequency_distribution.png) is built from bout_peaks_by_state,
+    # which run_pipeline populates from curves["bout_peak_freqs"] -- confirm
+    # run_subject_state_channel actually threads that key through the 4th tuple element
+    # when return_curves=True, matching the fixture's 3 N2 spindle bouts.
+    record, bout_records, failure, curves = ppl.run_subject_state_channel(
+        fake_subject_tree, "SUBJ001", "C3", "N2", return_curves=True,
+    )
+    assert failure is None
+    assert record is not None
+    assert len(bout_records) == 3
+    assert "bout_peak_freqs" in curves
+    bout_peak_freqs = np.asarray(curves["bout_peak_freqs"])
+    assert bout_peak_freqs.shape == (3,)
 
 
 def test_run_subject_state_channel_n3_has_no_valid_bouts_returns_none_record(fake_subject_tree):
