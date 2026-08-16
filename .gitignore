@@ -20,6 +20,8 @@ results/
 results_tmp/
 papers/
 slides/
+md/
+docs/
 
 # Slurm job output
 slurm-*.out

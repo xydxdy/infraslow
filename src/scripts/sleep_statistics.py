@@ -1,6 +1,12 @@
 #!/usr/bin/env python
-"""Per-subject YASA sleep statistics for every subject already preprocessed
-under ``--data-dir`` (one row per subject id found there).
+"""Per-subject YASA sleep statistics for every valid subject (one row per
+subject id).
+
+Subjects are discovered the same way as ``preprocessing.py`` -- via
+:func:`preprocessing.list_valid_subjects` (same two metadata CSVs, same
+EDF/Hypnodensity directories) -- so this script's cohort always matches
+``preprocessing.py``'s, instead of drifting from whatever happens to be
+sitting in an output directory.
 
 Only the hypnogram is needed to compute sleep statistics, so this reads each
 subject's Hypnodensity CSV directly (:func:`~infraslow.io.hypnodensity.
@@ -26,7 +32,6 @@ Run via Slurm, not the login node, from this file's own directory
 
     export PYTHONPATH=/home/users/chaisaen/infraslow/src
     python3 sleep_statistics.py \\
-        --data-dir /scratch/users/chaisaen/processed_data/data \\
         --output /scratch/users/chaisaen/processed_data/sleep_statistics.csv
 
 See ``run_sleep_statistics.sbatch`` to submit this as a Slurm job.
@@ -46,14 +51,18 @@ import pandas as pd
 import yasa
 
 from infraslow.constants import (
+    DEFAULT_EDF_DIR,
     DEFAULT_EPOCH_SEC,
     DEFAULT_HYPNO_DIR,
     DEFAULT_HYPNODENSITY_SUFFIX,
+    DEFAULT_METADATA,
+    DEFAULT_METADATA2,
     DEFAULT_STAGE_MAP,
 )
 from infraslow.io.hypnodensity import hypnodensity_to_annotations
 from infraslow.io.utils import progress_iter
 from infraslow.processing.spindle import _extract_epoch_stages, _stages_to_int
+from preprocessing import list_valid_subjects
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +74,10 @@ def _env_str(name: str, default: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--data-dir", type=Path,
-        default=Path(os.path.expandvars(
-            _env_str("DATA_DIR", "/scratch/users/chaisaen/processed_data/data"))),
-        help="Directory of already-preprocessed {subject_id}/ folders (env: "
-             "DATA_DIR) -- its subdirectory names *are* the subject list.",
-    )
+    p.add_argument("--metadata", default=DEFAULT_METADATA, help="Primary metadata CSV path.")
+    p.add_argument("--metadata2", default=DEFAULT_METADATA2,
+                    help="Second metadata CSV path, combined with --metadata by ID.")
+    p.add_argument("--edf-dir", default=DEFAULT_EDF_DIR, help="Directory of {id}.edf files.")
     p.add_argument("--hypno-dir", default=DEFAULT_HYPNO_DIR,
                     help="Directory of {id}_Hypnodensity.csv files.")
     p.add_argument("--epoch-sec", type=float, default=DEFAULT_EPOCH_SEC,
@@ -92,12 +98,6 @@ def parse_args() -> argparse.Namespace:
              "$SLURM_CPUS_PER_TASK, else 1).",
     )
     return p.parse_args()
-
-
-def list_subjects(data_dir: Path) -> List[str]:
-    """Every subject id -- one subdirectory name directly under ``data_dir``, sorted."""
-    with os.scandir(data_dir) as it:
-        return sorted(entry.name for entry in it if entry.is_dir())
 
 
 def compute_subject_stats(
@@ -134,11 +134,11 @@ def main() -> None:
     )
 
     hypno_dir = Path(os.path.expandvars(args.hypno_dir))
-    subjects = list_subjects(args.data_dir)
+    subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.hypno_dir)
     if args.limit:
         subjects = subjects[: args.limit]
     workers = max(1, args.workers)
-    logger.info(f"{len(subjects)} subject(s) found under {args.data_dir}; workers={workers}")
+    logger.info(f"{len(subjects)} valid subject(s); workers={workers}")
 
     tasks = [(subject_id, hypno_dir, args.epoch_sec) for subject_id in subjects]
     # Each task is one small CSV read + a cheap yasa call, so a large chunksize
