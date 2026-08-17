@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=sleep_statistics
-#SBATCH --partition=mignot
+#SBATCH --partition=normal
 #SBATCH --output=/scratch/users/chaisaen/logs/sleep_statistics_%j.out
-#SBATCH --time=48:00:00
+#SBATCH --time=8:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=4G
+#SBATCH --cpus-per-task=3
+#SBATCH --mem=8G
 
 # Runs src/scripts/sleep_statistics.py over the same valid Bioserenity cohort
 # as run_preprocessing.sbatch (every subject with both an EDF and a
@@ -20,8 +20,7 @@
 # run_preprocessing.sbatch's per-channel EEG work.
 #
 # Override at submit time, e.g.:
-#   sbatch --export=ALL,OUTPUT=/scratch/users/chaisaen/processed_data/sleep_statistics.csv \
-#       run_sleep_statistics.sbatch
+#   sbatch --export=ALL,OUTPUT=/scratch/users/chaisaen/processed_data/sleep_statistics.csv run_sleep_statistics.sbatch
 #   sbatch --export=ALL,LIMIT=50 run_sleep_statistics.sbatch   # quick test: 50 subjects
 
 set -euo pipefail
