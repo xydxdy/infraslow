@@ -176,6 +176,77 @@ def test_run_pipeline_zero_records_for_selected_state_does_not_crash(fake_subjec
     assert (failures["sleep_state"] == "N3").any()
 
 
+def test_find_paired_subject_data_selects_first_n_with_both_states(tmp_path):
+    from .conftest import _write_envelope, _write_temporal_isfs, _write_stage
+
+    data_dir = tmp_path / "data"
+    bouts = [(50.0, 350.0), (450.0, 750.0)]
+
+    # SUBJ001: valid N2 AND N3 (paired) -- included.
+    ch1 = data_dir / "SUBJ001" / "C3"
+    _write_envelope(ch1, "sigma", 1200, seed=1)
+    _write_envelope(ch1, "delta", 1200, seed=2)
+    _write_temporal_isfs(ch1, "sigma", 1200, seed=3)
+    _write_temporal_isfs(ch1, "delta", 1200, seed=4)
+    _write_stage(ch1, "N2", bouts, seed=10)
+    _write_stage(ch1, "N3", bouts, seed=20)
+
+    # SUBJ002: N2 only -- N3's only bout (45s) is below the 200s min_dur, matching
+    # fake_subject_tree's own pattern for an "N3 unavailable" subject -- excluded.
+    ch2 = data_dir / "SUBJ002" / "C3"
+    _write_envelope(ch2, "sigma", 1200, seed=5)
+    _write_envelope(ch2, "delta", 1200, seed=6)
+    _write_temporal_isfs(ch2, "sigma", 1200, seed=7)
+    _write_temporal_isfs(ch2, "delta", 1200, seed=8)
+    _write_stage(ch2, "N2", bouts, seed=30)
+    _write_stage(ch2, "N3", [(0.0, 45.0)], seed=40)
+
+    # SUBJ003: valid N2 AND N3 -- included (2nd pick once SUBJ002 is skipped).
+    ch3 = data_dir / "SUBJ003" / "C3"
+    _write_envelope(ch3, "sigma", 1200, seed=9)
+    _write_envelope(ch3, "delta", 1200, seed=11)
+    _write_temporal_isfs(ch3, "sigma", 1200, seed=12)
+    _write_temporal_isfs(ch3, "delta", 1200, seed=13)
+    _write_stage(ch3, "N2", bouts, seed=50)
+    _write_stage(ch3, "N3", bouts, seed=60)
+
+    result = ppl.find_paired_subject_data(data_dir, "C3", ("N2", "N3"), limit=2)
+
+    assert list(result) == ["SUBJ001", "SUBJ003"]
+    for sid in result:
+        for state in ("N2", "N3"):
+            record, bout_records, curves = result[sid][state]
+            assert record["subject_id"] == sid
+            assert record["sleep_state"] == state
+            assert isinstance(bout_records, list)
+            assert {"freqs", "rel", "corrected"}.issubset(curves)
+
+
+def test_find_paired_subject_data_no_limit_returns_every_eligible_subject(tmp_path):
+    from .conftest import _write_envelope, _write_temporal_isfs, _write_stage
+
+    data_dir = tmp_path / "data"
+    bouts = [(50.0, 350.0)]
+    for sid, seed in (("SUBJ_A", 1), ("SUBJ_B", 2)):
+        ch = data_dir / sid / "C3"
+        _write_envelope(ch, "sigma", 1200, seed=seed)
+        _write_envelope(ch, "delta", 1200, seed=seed + 1)
+        _write_temporal_isfs(ch, "sigma", 1200, seed=seed + 2)
+        _write_temporal_isfs(ch, "delta", 1200, seed=seed + 3)
+        _write_stage(ch, "N2", bouts, seed=seed + 10)
+        _write_stage(ch, "N3", bouts, seed=seed + 20)
+
+    result = ppl.find_paired_subject_data(data_dir, "C3", ("N2", "N3"))
+    assert list(result) == ["SUBJ_A", "SUBJ_B"]
+
+
+def test_find_paired_subject_data_excludes_subject_missing_from_every_state(fake_subject_tree):
+    # fake_subject_tree's only subject (SUBJ001) has valid N2 but no valid N3 bout --
+    # zero fully-paired subjects, not a crash or a partial entry.
+    result = ppl.find_paired_subject_data(fake_subject_tree, "C3", ("N2", "N3"))
+    assert result == {}
+
+
 def test_cohort_summary_csv_has_circular_mean_phase_not_linear_mean_phase(fake_subject_tree, tmp_path, monkeypatch):
     # The fixture's N2 only has 3 spindle events, below DEFAULT_ISFS_MIN_EVENTS=5, so
     # compute_subject_phase_features would normally return None (no phase feats, no

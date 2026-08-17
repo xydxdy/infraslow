@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -154,6 +154,43 @@ def run_subject_state_channel(
     return (record, bout_records, None, curves) if return_curves else (record, bout_records, None)
 
 
+def find_paired_subject_data(
+    data_dir: Path, channel: str, states: Sequence[str] = ("N2", "N3"), *,
+    limit: Optional[int] = None,
+) -> Dict[str, Dict[str, Tuple[dict, List[dict], dict]]]:
+    """The first `limit` subjects (sorted by id, via `pio.discover_subjects`) with a
+    valid (non-`None`) record for *every* one of `states` on `channel` -- every eligible
+    subject if `limit` is `None`.
+
+    Returns `{subject_id: {state: (record, bout_records, curves)}}`, reusing
+    `run_subject_state_channel(..., return_curves=True)` per subject/state so the same
+    spectrum/phase computation is not repeated later for analysis -- a caller that only
+    needs the subject id list can do `list(result)`, already in sorted order. A subject
+    failing on any one state (e.g. no spindle-containing bouts) is dropped entirely rather
+    than included with a missing state, so every returned subject has a complete pair.
+
+    Computes every requested state for a candidate subject even when an earlier state in
+    `states` turns out to be the one that's actually valid and a later one disqualifies the
+    subject -- deliberately simple (no bout-count pre-check) since this targets small demo
+    selections (e.g. the first 10 of a cohort), not a full-cohort scan.
+    """
+    out: Dict[str, Dict[str, Tuple[dict, List[dict], dict]]] = {}
+    for subject_id in pio.discover_subjects(data_dir):
+        per_state: Dict[str, Tuple[dict, List[dict], dict]] = {}
+        for state in states:
+            record, bout_records, _failure, curves = run_subject_state_channel(
+                data_dir, subject_id, channel, state, return_curves=True,
+            )
+            if record is None:
+                break
+            per_state[state] = (record, bout_records, curves)
+        if len(per_state) == len(states):
+            out[subject_id] = per_state
+            if limit is not None and len(out) >= limit:
+                break
+    return out
+
+
 def _discover_channels(config: PipelineConfig, subject_id: str) -> Tuple[str, ...]:
     if config.channels is not None:
         return config.channels
@@ -285,4 +322,4 @@ def run_pipeline(config: PipelineConfig) -> None:
                 len(subject_state_records), len(bout_records), len(failures), config.output_dir)
 
 
-__all__ = ["PipelineConfig", "run_subject_state_channel", "run_pipeline"]
+__all__ = ["PipelineConfig", "run_subject_state_channel", "find_paired_subject_data", "run_pipeline"]
