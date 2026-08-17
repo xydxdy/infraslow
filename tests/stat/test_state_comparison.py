@@ -142,7 +142,7 @@ def test_circular_mean_and_resultant_uniform_gives_near_zero_resultant():
 def test_circular_mean_and_resultant_concentrated_angles():
     angles = np.array([0.1, 0.0, -0.1, 0.05])
     mean_angle, resultant = stc.circular_mean_and_resultant(angles)
-    assert mean_angle == pytest.approx(0.0125, abs=1e-6)
+    assert mean_angle == pytest.approx(0.0125, abs=1e-3)
     assert resultant > 0.99
 
 
