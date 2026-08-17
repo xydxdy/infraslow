@@ -63,6 +63,15 @@ def test_paired_ttest_fewer_than_two_pairs_returns_nan_stats():
     assert np.isnan(result["p_value"])
 
 
+def test_paired_ttest_zero_variance_diff_returns_nan_stats():
+    x = np.array([1.0, 2.0, 3.0])
+    y = np.array([0.0, 1.0, 2.0])  # constant difference (1.0) -> zero variance
+    result = stc.paired_ttest(x, y)
+    assert result["n_pairs"] == 3
+    assert np.isnan(result["t_stat"])
+    assert np.isnan(result["p_value"])
+
+
 def test_paired_effect_size_matches_manual_cohens_dz():
     x = np.array([10.0, 12.0, 9.0, 15.0, 11.0])
     y = np.array([8.0, 10.0, 9.5, 13.0, 9.0])
@@ -100,8 +109,10 @@ def test_compare_phase_bins_shape_and_columns():
     result = stc.compare_phase_bins(n2_rates, n3_rates, bin_centers)
     assert len(result) == 8
     assert list(result["phase_bin"]) == list(range(1, 9))
-    assert {"phase_center", "N2_mean", "N3_mean", "mean_difference", "t_stat",
+    assert {"phase_center", "N2_mean", "N3_mean", "mean_difference", "n_pairs", "t_stat",
             "p_value", "q_value", "significant_FDR"}.issubset(result.columns)
+    n_subjects = n2_rates.shape[0]
+    assert (result["n_pairs"] == n_subjects).all()
 
 
 def test_compare_phase_bins_rejects_mismatched_shapes():
@@ -131,6 +142,18 @@ def test_compare_isfs_metrics_skips_missing_columns():
     metrics = {"auc": "auc", "not_a_column": "missing"}
     result = stc.compare_isfs_metrics(n2_df, n3_df, metrics)
     assert list(result["Metric"]) == ["auc"]
+
+
+def test_compare_isfs_metrics_all_missing_returns_empty_with_expected_schema():
+    n2_df = pd.DataFrame({"auc": [1.0, 1.1]})
+    n3_df = pd.DataFrame({"auc": [0.8, 0.9]})
+    metrics = {"not_a_column": "missing"}
+    result = stc.compare_isfs_metrics(n2_df, n3_df, metrics)
+    assert len(result) == 0
+    assert list(result.columns) == [
+        "Metric", "N2 Mean", "N2 SD", "N3 Mean", "N3 SD", "Mean Difference",
+        "t", "p", "n_pairs", "Cohen's dz", "q",
+    ]
 
 
 def test_circular_mean_and_resultant_uniform_gives_near_zero_resultant():

@@ -67,6 +67,14 @@ def paired_ttest(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
             mean_diff=float((x - y).mean()) if n else float("nan"),
             t_stat=float("nan"), p_value=float("nan"),
         )
+    if (x - y).std(ddof=1) == 0:
+        return dict(
+            n_pairs=n,
+            x_mean=float(x.mean()), x_sd=float(x.std(ddof=1)),
+            y_mean=float(y.mean()), y_sd=float(y.std(ddof=1)),
+            mean_diff=float((x - y).mean()),
+            t_stat=float("nan"), p_value=float("nan"),
+        )
     t_stat, p_value = stats.ttest_rel(x, y)
     return dict(
         n_pairs=n, x_mean=float(x.mean()), x_sd=float(x.std(ddof=1)),
@@ -121,8 +129,8 @@ def compare_phase_bins(
     `infraslow.pipeline.phase.bin_center_angle(np.arange(1, n_bins + 1))`.
 
     Returns one row per bin: `phase_bin` (1-indexed), `phase_center`, `N2_mean`,
-    `N3_mean`, `mean_difference`, `t_stat`, `p_value`, `q_value`, `significant_FDR`
-    (`q_value < 0.05`).
+    `N3_mean`, `mean_difference`, `n_pairs`, `t_stat`, `p_value`, `q_value`,
+    `significant_FDR` (`q_value < 0.05`).
     """
     n2_rates = np.asarray(n2_rates, dtype=float)
     n3_rates = np.asarray(n3_rates, dtype=float)
@@ -143,7 +151,7 @@ def compare_phase_bins(
         rows.append(dict(
             phase_bin=k + 1, phase_center=float(bin_centers[k]),
             N2_mean=res["x_mean"], N3_mean=res["y_mean"], mean_difference=res["mean_diff"],
-            t_stat=res["t_stat"], p_value=res["p_value"], q_value=float(q),
+            n_pairs=res["n_pairs"], t_stat=res["t_stat"], p_value=res["p_value"], q_value=float(q),
             significant_FDR=bool(not np.isnan(q) and q < 0.05),
         ))
     return pd.DataFrame(rows)
@@ -183,7 +191,14 @@ def compare_isfs_metrics(
     q_values = fdr_correct(p_values)
     for row, q in zip(rows, q_values):
         row["q"] = float(q)
-    return pd.DataFrame(rows)
+
+    columns = [
+        "Metric", "N2 Mean", "N2 SD", "N3 Mean", "N3 SD", "Mean Difference",
+        "t", "p", "n_pairs", "Cohen's dz", "q",
+    ]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def circular_mean_and_resultant(angles: np.ndarray) -> Tuple[float, float]:
