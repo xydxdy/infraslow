@@ -31,25 +31,34 @@ from ..processing.infraslow import (
 _CHROMATOGRAM_GRID_POINTS = 200  # matches demo_infraslow_yasa_compare.py's `fg = np.linspace(*band, 200)`
 
 
-def select_spindle_bouts(
-    bouts: Dict[str, np.ndarray], isfs: Dict[str, np.ndarray],
+def select_event_bouts(
+    event_bouts: np.ndarray, isfs: Dict[str, np.ndarray],
 ) -> Dict[str, np.ndarray]:
-    """The subset of `isfs`'s per-bout rows whose bout matches a spindle-containing bout.
+    """The subset of `isfs`'s per-bout rows whose bout matches one of `event_bouts`
+    (e.g. `bouts["spindle"]` or `sw_bouts["sw"]`).
 
-    `isfs["bout_start"]` and `bouts["all"][:, 0]` come from the exact same
-    `all_bouts` list inside `preprocess_channel` (same order, same float
-    values, no recomputation), so matching against `bouts["spindle"][:, 0]`
-    by exact float equality recovers the notebook's own "N2/N3 bouts >=
-    min_dur AND containing >= 1 spindle" selection without ever touching
-    the raw EEG signal.
+    `isfs["bout_start"]` and `bouts["all"][:, 0]`/`sw_bouts["all"][:, 0]` come from the
+    exact same `all_bouts` list inside `preprocess_channel` (same order, same float
+    values, no recomputation), so matching against `event_bouts[:, 0]` by exact float
+    equality recovers the notebook's own "N2/N3 bouts >= min_dur AND containing >= 1
+    event" selection (spindle or slow-wave, whichever `event_bouts` came from) without
+    ever touching the raw EEG signal.
     """
-    spindle_starts = bouts["spindle"][:, 0] if bouts["spindle"].size else np.empty(0)
-    mask = np.isin(isfs["bout_start"], spindle_starts)
+    starts = event_bouts[:, 0] if event_bouts.size else np.empty(0)
+    mask = np.isin(isfs["bout_start"], starts)
     return {
         "freqs": isfs["freqs"],
         "psds": isfs["psds"][mask],
         "bout_start": isfs["bout_start"][mask],
     }
+
+
+def select_spindle_bouts(
+    bouts: Dict[str, np.ndarray], isfs: Dict[str, np.ndarray],
+) -> Dict[str, np.ndarray]:
+    """Backward-compatible spindle-specific wrapper around `select_event_bouts`
+    (see its docstring) -- equivalent to `select_event_bouts(bouts["spindle"], isfs)`."""
+    return select_event_bouts(bouts["spindle"], isfs)
 
 
 def _nan_spectrum_features() -> Dict[str, float]:
@@ -143,6 +152,7 @@ def compute_bout_peak_freqs(
 
 
 __all__ = [
+    "select_event_bouts",
     "select_spindle_bouts",
     "compute_subject_spectrum_features",
     "compute_bout_peak_freqs",

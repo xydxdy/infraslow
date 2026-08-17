@@ -27,6 +27,21 @@ from . import spectrum as psp
 logger = logging.getLogger(__name__)
 
 _BANDS = ("sigma", "delta")
+
+# Which artifacts drive the ISFS spectrum + phase-locking analysis in
+# `run_subject_state_channel`, per `event`. "spindle"/sigma is the original (and
+# default) pathway; "sw"/delta is the slow-wave analog -- `preprocessing.py` writes
+# both symmetrically (`bouts.npz["spindle"]` + `spindel_yasa.csv["Peak"]` vs.
+# `sw_bouts.npz["sw"]` + `sw_yasa.csv["NegPeak"]`, both against the same underlying
+# `all_bouts`), so this is purely a which-artifacts-to-read switch, not new science.
+_EVENT_SPECS = {
+    "spindle": dict(band="sigma", bouts_key="spindle",
+                     load_bouts=pio.load_stage_bouts, load_summary=pio.load_spindle_summary,
+                     peak_col="Peak"),
+    "sw": dict(band="delta", bouts_key="sw",
+                load_bouts=pio.load_stage_sw_bouts, load_summary=pio.load_sw_summary,
+                peak_col="NegPeak"),
+}
 _SPECTRUM_VALUE_COLS = [
     "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc", "chromatogram_peak_area",
     "bi_gaussian_amp", "bi_gaussian_mu", "bi_gaussian_sd_l", "bi_gaussian_sd_r",
@@ -62,7 +77,8 @@ class PipelineConfig:
 
 
 def run_subject_state_channel(
-    data_dir: Path, subject_id: str, channel: str, state: str, *, return_curves: bool = False,
+    data_dir: Path, subject_id: str, channel: str, state: str, *,
+    event: str = "spindle", return_curves: bool = False,
 ) -> Union[
     Tuple[Optional[dict], List[dict], Optional[dict]],
     Tuple[Optional[dict], List[dict], Optional[dict], Optional[dict]],
@@ -70,57 +86,77 @@ def run_subject_state_channel(
     """`(subject_state_record_or_None, bout_records, failure_or_None)` for
     one `(subject, channel, state)`. A `None` record with a non-`None`
     failure means either an unreadable artifact (`stage` names which loader
-    failed) or -- not an error -- zero spindle-containing bouts for this
+    failed) or -- not an error -- zero `event`-containing bouts for this
     state (`stage="bouts"`), matching the spec's "keep N2, report N3
     unavailable" requirement rather than writing a NaN-filled row.
+
+    `event` selects which artifact pair drives the ISFS spectrum + phase-locking
+    analysis (see `_EVENT_SPECS`): `"spindle"` (default, unchanged behavior) pairs
+    sigma-band ISFS spectra with `bouts.npz["spindle"]`/`spindel_yasa.csv["Peak"]`;
+    `"sw"` is the slow-wave analog, pairing delta-band ISFS spectra with
+    `sw_bouts.npz["sw"]`/`sw_yasa.csv["NegPeak"]`. Either way, `spindle_count`/
+    `slow_wave_count`/`sigma_power_db`/`delta_power_db` are always computed for
+    *both* event types and bands in the returned record -- `event` only picks which
+    one the spectrum/phase-bin/peak-frequency fields (and `bout_records`) describe.
 
     When `return_curves` is set, a 4th element (the `freqs`/`rel`/`corrected`/
     `bout_peak_freqs` intermediate spectrum arrays, or `None` when no record
     was produced) is appended to the returned tuple; the default 3-tuple
     stays unchanged for every existing caller."""
+    spec = _EVENT_SPECS[event]
+    band, bouts_key = spec["band"], spec["bouts_key"]
     subject_dir = Path(data_dir) / subject_id
     try:
-        bouts = pio.load_stage_bouts(subject_dir, channel, state)
+        event_bouts = spec["load_bouts"](subject_dir, channel, state)
     except (FileNotFoundError, OSError) as exc:
         failure = dict(subject_id=subject_id, sleep_state=state, channel=channel,
                         stage="bouts", error=str(exc))
         return (None, [], failure, None) if return_curves else (None, [], failure)
 
     # Defensive: preprocessing.py's MIN_BOUT_SEC (see src/scripts/preprocessing.py) already
-    # keeps bouts.npz's "all"/"spindle" bouts >= this length in a real run, but pipeline.py
-    # should not blindly trust that every upstream artifact satisfies that invariant.
-    if bouts["spindle"].shape[0]:
-        durations = bouts["spindle"][:, 1] - bouts["spindle"][:, 0]
-        bouts["spindle"] = bouts["spindle"][durations >= DEFAULT_MIN_BOUT_SEC]
+    # keeps bouts.npz's/sw_bouts.npz's "all"/event bouts >= this length in a real run, but
+    # pipeline.py should not blindly trust that every upstream artifact satisfies that
+    # invariant.
+    if event_bouts[bouts_key].shape[0]:
+        durations = event_bouts[bouts_key][:, 1] - event_bouts[bouts_key][:, 0]
+        event_bouts[bouts_key] = event_bouts[bouts_key][durations >= DEFAULT_MIN_BOUT_SEC]
 
-    if bouts["spindle"].shape[0] == 0:
+    if event_bouts[bouts_key].shape[0] == 0:
         failure = dict(subject_id=subject_id, sleep_state=state, channel=channel,
-                        stage="bouts", error="no spindle-containing bouts for this state")
+                        stage="bouts", error=f"no {event}-containing bouts for this state")
         return (None, [], failure, None) if return_curves else (None, [], failure)
 
     try:
-        isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, "sigma")
-        selected = psp.select_spindle_bouts(bouts, isfs)
+        isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, band)
+        selected = psp.select_event_bouts(event_bouts[bouts_key], isfs)
         spectrum_feats, curves = psp.compute_subject_spectrum_features(
             selected["freqs"], selected["psds"], return_curves=True,
         )
         bout_peak_freqs = psp.compute_bout_peak_freqs(selected["freqs"], selected["psds"])
 
-        t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, "sigma")
-        spindle_summary = pio.load_spindle_summary(subject_dir, channel, state)
-        event_times = spindle_summary["Peak"].to_numpy() if "Peak" in spindle_summary.columns else np.empty(0)
-        bouts_data = pph.build_bout_phase_data(t_env, filtered, bouts["spindle"], event_times)
+        t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, band)
+        event_summary = spec["load_summary"](subject_dir, channel, state)
+        peak_col = spec["peak_col"]
+        event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
+        bouts_data = pph.build_bout_phase_data(t_env, filtered, event_bouts[bouts_key], event_times)
         phase_feats = pph.compute_subject_phase_features(bouts_data)
 
-        sw_bouts = pio.load_stage_sw_bouts(subject_dir, channel, state)
-        sw_summary = pio.load_sw_summary(subject_dir, channel, state)
+        # spindle_count/slow_wave_count/sigma_power_db/delta_power_db are always computed
+        # for both event types and both bands, regardless of `event` -- reuse event_bouts/
+        # event_summary instead of a redundant re-load when they already *are* the type
+        # being reused here.
+        bouts = event_bouts if event == "spindle" else pio.load_stage_bouts(subject_dir, channel, state)
+        sw_bouts = event_bouts if event == "sw" else pio.load_stage_sw_bouts(subject_dir, channel, state)
+        spindle_summary = event_summary if event == "spindle" else pio.load_spindle_summary(
+            subject_dir, channel, state)
+        sw_summary = event_summary if event == "sw" else pio.load_sw_summary(subject_dir, channel, state)
         spindle_feats = pft.compute_spindle_features(spindle_summary, bouts["all"])
         sw_feats = pft.compute_slow_wave_features(sw_summary, sw_bouts["all"])
 
         band_feats: Dict[str, float] = {}
-        for band in _BANDS:
-            b_t_env, b_power = pio.load_envelope(subject_dir, channel, band)
-            band_feats.update(pft.compute_band_power_feature(b_t_env, b_power, bouts["all"], name=band))
+        for b in _BANDS:
+            b_t_env, b_power = pio.load_envelope(subject_dir, channel, b)
+            band_feats.update(pft.compute_band_power_feature(b_t_env, b_power, bouts["all"], name=b))
     except Exception as exc:  # noqa: BLE001 - one bad subject/channel/state must not sink the whole run
         logger.exception("subject=%s channel=%s state=%s failed", subject_id, channel, state)
         failure = dict(subject_id=subject_id, sleep_state=state, channel=channel,
@@ -141,10 +177,10 @@ def run_subject_state_channel(
         record["phase_bin_rates"] = None
 
     # bout_start (from `selected`) only carries each bout's start time; build (start, stop)
-    # bout records straight from bouts["spindle"] instead -- exact same values (same source
-    # array `select_spindle_bouts` matched against), no lookup needed.
+    # bout records straight from event_bouts[bouts_key] instead -- exact same values (same
+    # source array `select_event_bouts` matched against), no lookup needed.
     bout_records = []
-    for i, (a, b) in enumerate(bouts["spindle"]):
+    for i, (a, b) in enumerate(event_bouts[bouts_key]):
         bout_records.append(dict(
             subject_id=subject_id, sleep_state=state, channel=channel, bout_id=i,
             bout_start=float(a), bout_stop=float(b), bout_duration=float(b - a),
@@ -156,17 +192,21 @@ def run_subject_state_channel(
 
 def find_paired_subject_data(
     data_dir: Path, channel: str, states: Sequence[str] = ("N2", "N3"), *,
-    limit: Optional[int] = None,
+    limit: Optional[int] = None, event: str = "spindle",
 ) -> Dict[str, Dict[str, Tuple[dict, List[dict], dict]]]:
     """The first `limit` subjects (sorted by id, via `pio.discover_subjects`) with a
     valid (non-`None`) record for *every* one of `states` on `channel` -- every eligible
     subject if `limit` is `None`.
 
+    `event` is forwarded to `run_subject_state_channel` (see its docstring):
+    `"spindle"` (default) for the sigma/spindle ISFS + phase-locking pathway, `"sw"`
+    for the delta/slow-wave analog.
+
     Returns `{subject_id: {state: (record, bout_records, curves)}}`, reusing
     `run_subject_state_channel(..., return_curves=True)` per subject/state so the same
     spectrum/phase computation is not repeated later for analysis -- a caller that only
     needs the subject id list can do `list(result)`, already in sorted order. A subject
-    failing on any one state (e.g. no spindle-containing bouts) is dropped entirely rather
+    failing on any one state (e.g. no `event`-containing bouts) is dropped entirely rather
     than included with a missing state, so every returned subject has a complete pair.
 
     Computes every requested state for a candidate subject even when an earlier state in
@@ -179,7 +219,7 @@ def find_paired_subject_data(
         per_state: Dict[str, Tuple[dict, List[dict], dict]] = {}
         for state in states:
             record, bout_records, _failure, curves = run_subject_state_channel(
-                data_dir, subject_id, channel, state, return_curves=True,
+                data_dir, subject_id, channel, state, event=event, return_curves=True,
             )
             if record is None:
                 break
