@@ -30,6 +30,11 @@ DEFAULT_METADATA2 = str(METADATA_DIR / "bioserenity_metadata3.csv")
 DEFAULT_DRUG_METADATA = str(METADATA_DIR / "drug_usage_metadata.csv")
 DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
 DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
+#: 1-second U-Sleep hypnodensities: one ``{channel_file}.npy`` per subject/channel,
+#: shape ``(n_seconds, 5)``, columns in ``USLEEP_STAGE_ORDER`` order. A different data
+#: source from ``DEFAULT_HYPNO_DIR``'s 30-s Bioserenity Hypnodensity CSVs (see
+#: ``infraslow.io.usleep_hypnodensity``).
+DEFAULT_USLEEP_HYPNODENSITY_DIR = "$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities"
 DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
 
 
@@ -39,6 +44,28 @@ DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
 DEFAULT_TIMESTAMP_COLUMN = "Timestamp"
 DEFAULT_STAGING_DIRNAME = "Sleep_Staging"
 DEFAULT_HYPNODENSITY_SUFFIX = "_Hypnodensity.csv"
+
+
+# --------------------------------------------------------------------------- #
+# I/O -- 1-s U-Sleep hypnodensity (see infraslow.io.usleep_hypnodensity).
+# --------------------------------------------------------------------------- #
+#: Column order of the 5 stage-probability columns in each U-Sleep hypnodensity
+#: ``.npy`` file -- matches the stage order ``infraslow.io.hypnodensity`` already uses
+#: for the (30-s epoch) Bioserenity hypnodensity CSVs. Not independently verifiable from
+#: the ``.npy`` files themselves (no header); documented, not asserted, as an assumption.
+USLEEP_STAGE_ORDER: Tuple[str, ...] = ("Wake", "N1", "N2", "N3", "REM")
+
+#: Seconds per row of the raw U-Sleep hypnodensity files (1-second resolution).
+DEFAULT_USLEEP_EPOCH_SEC = 1.0
+
+#: Default window (s) averaged when reducing 1-s U-Sleep hypnodensity to a coarser
+#: hypnogram (see ``hypnodensity_to_epoch_hypnogram``).
+DEFAULT_HYPNOGRAM_EPOCH_SEC = 3.0
+
+#: Max allowed |duration mismatch| (s) between a subject's U-Sleep hypnodensity length
+#: and its ``temporal_ISFS`` envelope length before the two are treated as misaligned
+#: recordings.
+DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC = 120.0
 
 
 # --------------------------------------------------------------------------- #
@@ -218,10 +245,12 @@ __all__ = [
     # Paths
     "METADATA_DIR", "REPO_ROOT", "DEFAULT_METADATA", "DEFAULT_METADATA2",
     "DEFAULT_DRUG_METADATA", "DEFAULT_EDF_DIR", "DEFAULT_HYPNO_DIR",
-    "DEFAULT_DRUG_EXCLUDE_LIST",
+    "DEFAULT_USLEEP_HYPNODENSITY_DIR", "DEFAULT_DRUG_EXCLUDE_LIST",
     # I/O
     "DEFAULT_TIMESTAMP_COLUMN", "DEFAULT_STAGING_DIRNAME",
-    "DEFAULT_HYPNODENSITY_SUFFIX", "N_IO_WORKERS", "BIOSERENITY_ALIAS_MAP",
+    "DEFAULT_HYPNODENSITY_SUFFIX", "USLEEP_STAGE_ORDER", "DEFAULT_USLEEP_EPOCH_SEC",
+    "DEFAULT_HYPNOGRAM_EPOCH_SEC", "DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC",
+    "N_IO_WORKERS", "BIOSERENITY_ALIAS_MAP",
     # Processing
     "DEFAULT_TARGET_SFREQ", "NREM_STAGES", "DEFAULT_EPOCH_SEC",
     "DEFAULT_STAGE_MAP", "DEFAULT_EEG_CHANNELS", "DEFAULT_FREQ_SW",
