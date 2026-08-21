@@ -67,6 +67,45 @@ def build_bout_phase_data(
     return out
 
 
+def build_subject_phase_timeseries(
+    t_env: np.ndarray, filtered: np.ndarray, bouts: np.ndarray, *,
+    isfs_period=DEFAULT_ISFS_PERIOD,
+) -> Dict[str, np.ndarray]:
+    """Whole-recording ISFS phase time series, built from every bout in `bouts`
+    (absolute recording-relative time, sorted).
+
+    Thin orchestration over `build_bout_phase_data` (unmodified) and `bin_center_angle`
+    (unmodified) -- no new phase math. Each bout's bout-relative `(t, phase_bins)` is
+    shifted back to absolute time (`+ bout_start`) and concatenated across every bout,
+    then sorted by time (bouts are disjoint by construction, so this is a stable
+    concatenation, not a merge). No events are needed for this call (unlike
+    `build_bout_phase_data`'s original spindle/SW-alignment use), so an empty
+    `event_times` is passed through.
+
+    Returns:
+        `{"t": (n,) absolute seconds, "phase_bin": (n,) int 0-8, "phase_angle": (n,)
+        float, NaN where phase_bin == 0 ("Not ISFS")}`, all sorted by `t`. Empty (but
+        correctly-shaped) arrays if `bouts` is empty.
+    """
+    bouts = np.asarray(bouts, dtype=float).reshape(-1, 2)
+    if bouts.shape[0] == 0:
+        return dict(t=np.empty(0), phase_bin=np.empty(0, dtype=int), phase_angle=np.empty(0))
+
+    bouts_data = build_bout_phase_data(t_env, filtered, bouts, np.empty(0), isfs_period=isfs_period)
+    t_abs = np.concatenate([tt + a for (a, _b), (tt, _bins, _evt) in zip(bouts, bouts_data)])
+    phase_bin = np.concatenate([bins for _tt, bins, _evt in bouts_data])
+
+    order = np.argsort(t_abs, kind="stable")
+    t_abs = t_abs[order]
+    phase_bin = phase_bin[order]
+
+    phase_angle = np.full(phase_bin.shape, np.nan)
+    in_cycle = phase_bin > 0
+    phase_angle[in_cycle] = bin_center_angle(phase_bin[in_cycle])
+
+    return dict(t=t_abs, phase_bin=phase_bin, phase_angle=phase_angle)
+
+
 def compute_subject_phase_features(
     bouts_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray]], *,
     min_events: int = DEFAULT_ISFS_MIN_EVENTS,
@@ -136,6 +175,7 @@ def pool_phase_distributions(dists: List[Dict[str, object]]) -> Dict[str, object
 __all__ = [
     "bin_center_angle",
     "build_bout_phase_data",
+    "build_subject_phase_timeseries",
     "compute_subject_phase_features",
     "pool_phase_distributions",
 ]

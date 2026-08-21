@@ -66,3 +66,30 @@ def test_pool_phase_distributions_sums_counts():
     assert pooled["event_count"] == 5
     assert pooled["phase_bin_counts"] == [1, 1, 0, 0, 1, 0, 0, 2]
     assert pytest.approx(sum(pooled["phase_bin_rates"]), abs=1e-6) == 100.0 * pooled["n_in_isfs"] / pooled["event_count"]
+
+
+def test_build_subject_phase_timeseries_absolute_time_and_shapes(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")
+    bouts = pio.load_stage_bouts(subject_dir, "C3", "N2")["all"]
+
+    series = pph.build_subject_phase_timeseries(t_env, filtered, bouts)
+    assert series["t"].shape == series["phase_bin"].shape == series["phase_angle"].shape
+    assert series["t"].size > 0
+    # Absolute time, not bout-relative: every sample must fall inside one of the bouts.
+    for t in series["t"]:
+        assert any(a <= t < b for a, b in bouts)
+    assert np.all(np.diff(series["t"]) >= 0)  # sorted
+    in_cycle = series["phase_bin"] > 0
+    assert np.all(np.isnan(series["phase_angle"][~in_cycle]))
+    assert not np.any(np.isnan(series["phase_angle"][in_cycle]))
+    assert np.all((series["phase_angle"][in_cycle] > -np.pi) & (series["phase_angle"][in_cycle] <= np.pi))
+
+
+def test_build_subject_phase_timeseries_empty_bouts_returns_empty_arrays(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")
+    series = pph.build_subject_phase_timeseries(t_env, filtered, np.empty((0, 2)))
+    assert series["t"].size == 0
+    assert series["phase_bin"].size == 0
+    assert series["phase_angle"].size == 0
