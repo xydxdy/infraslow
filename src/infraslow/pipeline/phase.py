@@ -34,6 +34,12 @@ from ..processing.infraslow import (
     isfs_phase_bins,
 )
 
+#: Angle (rad) of each of the 8 landmark-segment boundaries `isfs_phase_bins` already
+#: computes (its `edges`, sample-index space) -- `start/trough/mid/peak/end` map to
+#: `-pi, -pi/2, 0, pi/2, pi` with one more boundary bisecting each half, i.e. the same
+#: fixed pi/4-wide bins `bin_center_angle` reports the centers of.
+_PHASE_BIN_BOUNDARIES = -np.pi + (np.pi / 4) * np.arange(9)
+
 
 def bin_center_angle(bin_idx) -> np.ndarray:
     """Evenly-spaced center angle in `(-pi, pi]` for ISFS phase bin(s) `1..8`."""
@@ -106,6 +112,93 @@ def build_subject_phase_timeseries(
     return dict(t=t_abs, phase_bin=phase_bin, phase_angle=phase_angle)
 
 
+def continuous_phase_samples(t: np.ndarray, x: np.ndarray, *, isfs_period=DEFAULT_ISFS_PERIOD) -> np.ndarray:
+    """Continuous per-sample ISFS phase in `(-pi, pi]`, NaN outside any valid cycle.
+
+    Calls `isfs_phase_bins` unmodified for cycle detection (no new zero-crossing/
+    trough/peak math) and reuses its own per-cycle `edges` (the same 9 landmark
+    sample indices bounding the 8 `pi/4`-wide bins `bin_center_angle` already
+    centers) -- this only linearly interpolates each sample's position *within*
+    its landmark segment by sample-index fraction, so a segment's own bin label
+    (e.g. bin 3) is refined from one integer to a continuum spanning that bin's
+    `pi/4` angular width instead of collapsing to its center. No new cycle
+    detection or phase definition is introduced.
+
+    Args:
+        t, x: same contract as `isfs_phase_bins` (`x` already `isfs_lowpass`-filtered
+            and mean-centered, e.g. z-scored per bout).
+        isfs_period: forwarded to `isfs_phase_bins`.
+
+    Returns:
+        `(n,)` float array, same length as `x`; NaN where `isfs_phase_bins` would
+        report bin `0` ("Not ISFS").
+    """
+    _bins, cycles = isfs_phase_bins(t, x, isfs_period=isfs_period)
+    phase = np.full(x.shape, np.nan)
+    for c in cycles:
+        edges = c["edges"]
+        for k in range(8):
+            i0, i1 = int(edges[k]), int(edges[k + 1])
+            if i1 <= i0:
+                continue
+            frac = (np.arange(i0, i1) - i0) / (i1 - i0)
+            phase[i0:i1] = _PHASE_BIN_BOUNDARIES[k] + frac * (
+                _PHASE_BIN_BOUNDARIES[k + 1] - _PHASE_BIN_BOUNDARIES[k]
+            )
+        phase[int(edges[-1])] = np.pi  # closed on the right, matches isfs_phase_bins's bins[c1] = 8
+    return phase
+
+
+def build_bout_continuous_phase_data(
+    t_env: np.ndarray, filtered: np.ndarray, bouts: np.ndarray, *,
+    isfs_period=DEFAULT_ISFS_PERIOD,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """One `(t, continuous_phase)` tuple per bout, bout-relative time base.
+
+    Same per-bout slicing/standardization as `build_bout_phase_data` (independent
+    z-score of each bout's own `filtered` slice), but reports `continuous_phase_samples`
+    instead of `isfs_phase_bins`'s discrete 1-8 label.
+    """
+    out: List[Tuple[np.ndarray, np.ndarray]] = []
+    for a, b in bouts:
+        m0 = (t_env >= a) & (t_env < b)
+        tt_b = t_env[m0] - a
+        filt_b = filtered[m0]
+        std = filt_b.std()
+        std_b = (filt_b - filt_b.mean()) / std if std > 0 else filt_b - filt_b.mean()
+        phase_b = continuous_phase_samples(tt_b, std_b, isfs_period=isfs_period)
+        out.append((tt_b, phase_b))
+    return out
+
+
+def build_subject_continuous_phase_timeseries(
+    t_env: np.ndarray, filtered: np.ndarray, bouts: np.ndarray, *,
+    isfs_period=DEFAULT_ISFS_PERIOD,
+) -> Dict[str, np.ndarray]:
+    """Whole-recording continuous ISFS phase time series (absolute time, sorted).
+
+    Mirrors `build_subject_phase_timeseries` exactly, but built from
+    `build_bout_continuous_phase_data` (continuous phase) instead of the discrete
+    1-8 bin label -- same bout-disjoint concatenate-then-sort construction, no new
+    phase math beyond `continuous_phase_samples`.
+
+    Returns:
+        `{"t": (n,) absolute seconds, "phase_angle": (n,) float, NaN outside any
+        valid cycle}`, sorted by `t`. Empty (but correctly-shaped) arrays if `bouts`
+        is empty.
+    """
+    bouts = np.asarray(bouts, dtype=float).reshape(-1, 2)
+    if bouts.shape[0] == 0:
+        return dict(t=np.empty(0), phase_angle=np.empty(0))
+
+    bouts_data = build_bout_continuous_phase_data(t_env, filtered, bouts, isfs_period=isfs_period)
+    t_abs = np.concatenate([tt + a for (a, _b), (tt, _ph) in zip(bouts, bouts_data)])
+    phase = np.concatenate([ph for _tt, ph in bouts_data])
+
+    order = np.argsort(t_abs, kind="stable")
+    return dict(t=t_abs[order], phase_angle=phase[order])
+
+
 def compute_subject_phase_features(
     bouts_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray]], *,
     min_events: int = DEFAULT_ISFS_MIN_EVENTS,
@@ -176,6 +269,9 @@ __all__ = [
     "bin_center_angle",
     "build_bout_phase_data",
     "build_subject_phase_timeseries",
+    "continuous_phase_samples",
+    "build_bout_continuous_phase_data",
+    "build_subject_continuous_phase_timeseries",
     "compute_subject_phase_features",
     "pool_phase_distributions",
 ]

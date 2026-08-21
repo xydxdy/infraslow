@@ -93,3 +93,60 @@ def test_build_subject_phase_timeseries_empty_bouts_returns_empty_arrays(fake_su
     assert series["t"].size == 0
     assert series["phase_bin"].size == 0
     assert series["phase_angle"].size == 0
+
+
+def test_continuous_phase_samples_matches_discrete_bin_ranges(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")
+    bouts = pio.load_stage_bouts(subject_dir, "C3", "N2")["all"]
+    a, b = bouts[0]
+    m0 = (t_env >= a) & (t_env < b)
+    tt = t_env[m0] - a
+    filt = filtered[m0]
+    std = filt.std()
+    std_b = (filt - filt.mean()) / std if std > 0 else filt - filt.mean()
+
+    bins, _cycles = pph.isfs_phase_bins(tt, std_b)
+    continuous = pph.continuous_phase_samples(tt, std_b)
+
+    assert continuous.shape == bins.shape
+    in_cycle = bins > 0
+    assert np.all(np.isnan(continuous[~in_cycle]))
+    assert not np.any(np.isnan(continuous[in_cycle]))
+    # Continuous phase spans the segment boundaries themselves (e.g. exactly -pi at a
+    # cycle's first sample), unlike the discrete bin centers which never land on -pi.
+    assert np.all((continuous[in_cycle] >= -np.pi) & (continuous[in_cycle] <= np.pi))
+    # Each sample's continuous phase must fall within its own discrete bin's pi/4-wide range.
+    boundaries = -np.pi + (np.pi / 4) * np.arange(9)
+    lo = boundaries[bins[in_cycle] - 1]
+    hi = boundaries[bins[in_cycle]]
+    assert np.all((continuous[in_cycle] >= lo - 1e-9) & (continuous[in_cycle] <= hi + 1e-9))
+    # Continuous phase increases monotonically from each cycle's own start up to (but
+    # not including) its closing sample -- like `isfs_phase_bins`'s own `bins` array,
+    # a cycle's closing index is shared with the next cycle's opening index, and
+    # whichever cycle is processed later in the loop wins that shared sample (the very
+    # last cycle in `_cycles` is the exception: nothing overwrites its own close).
+    for c in _cycles:
+        run = continuous[c["edges"][0] : c["edges"][-1]]
+        assert np.all(np.diff(run) >= -1e-9)
+
+
+def test_build_subject_continuous_phase_timeseries_absolute_time_and_shapes(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")
+    bouts = pio.load_stage_bouts(subject_dir, "C3", "N2")["all"]
+
+    series = pph.build_subject_continuous_phase_timeseries(t_env, filtered, bouts)
+    assert series["t"].shape == series["phase_angle"].shape
+    assert series["t"].size > 0
+    for t in series["t"]:
+        assert any(a <= t < b for a, b in bouts)
+    assert np.all(np.diff(series["t"]) >= 0)
+
+
+def test_build_subject_continuous_phase_timeseries_empty_bouts_returns_empty_arrays(fake_subject_tree):
+    subject_dir = fake_subject_tree / "SUBJ001"
+    t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")
+    series = pph.build_subject_continuous_phase_timeseries(t_env, filtered, np.empty((0, 2)))
+    assert series["t"].size == 0
+    assert series["phase_angle"].size == 0
