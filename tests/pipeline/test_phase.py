@@ -68,6 +68,29 @@ def test_pool_phase_distributions_sums_counts():
     assert pytest.approx(sum(pooled["phase_bin_rates"]), abs=1e-6) == 100.0 * pooled["n_in_isfs"] / pooled["event_count"]
 
 
+def test_resample_bin_rates_to_points_matches_at_bin_centers():
+    bin_rates = np.arange(1, 9, dtype=float)
+    bin_centers = pph.bin_center_angle(np.arange(1, 9))
+    out = pph.resample_bin_rates_to_points(bin_rates, bin_centers, bin_centers)
+    assert np.allclose(out, bin_rates)
+
+
+def test_resample_bin_rates_to_points_constant_rates_stay_constant():
+    bin_rates = np.full(8, 12.5)
+    bin_centers = pph.bin_center_angle(np.arange(1, 9))
+    phase_points = np.linspace(-np.pi, np.pi, 50, endpoint=False)
+    out = pph.resample_bin_rates_to_points(bin_rates, bin_centers, phase_points)
+    assert np.allclose(out, 12.5)
+
+
+def test_resample_bin_rates_to_points_interpolates_across_pi_seam():
+    bin_rates = np.array([10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 20.0])  # bins 1 and 8 wrap-adjacent
+    bin_centers = pph.bin_center_angle(np.arange(1, 9))
+    out_at_pi = pph.resample_bin_rates_to_points(bin_rates, bin_centers, np.array([np.pi]))
+    # interpolated between the two wrap-adjacent bins, not clamped to either edge value
+    assert 10.0 < out_at_pi[0] < 20.0
+
+
 def test_build_subject_phase_timeseries_absolute_time_and_shapes(fake_subject_tree):
     subject_dir = fake_subject_tree / "SUBJ001"
     t_env, filtered = pio.load_temporal_isfs(subject_dir, "C3", "sigma")

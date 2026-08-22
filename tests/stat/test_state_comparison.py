@@ -179,3 +179,50 @@ def test_circular_mean_and_resultant_all_nan_returns_nan():
     mean_angle, resultant = stc.circular_mean_and_resultant(np.array([np.nan, np.nan]))
     assert np.isnan(mean_angle)
     assert np.isnan(resultant)
+
+
+def test_per_subject_curve_correlation_perfect_positive_and_negative():
+    x = np.linspace(0.0, 1.0, 10)
+    rate_curves = np.tile(x, (2, 1))
+    stage_curves = np.stack([np.stack([x, 1 - x], axis=1)] * 2)
+    r = stc.per_subject_curve_correlation(rate_curves, stage_curves)
+    assert r.shape == (2, 2)
+    assert np.allclose(r[:, 0], 1.0)
+    assert np.allclose(r[:, 1], -1.0)
+
+
+def test_per_subject_curve_correlation_nan_on_constant_curve():
+    rate_curves = np.zeros((1, 5))  # zero variance
+    stage_curves = np.random.default_rng(0).normal(size=(1, 5, 2))
+    r = stc.per_subject_curve_correlation(rate_curves, stage_curves)
+    assert np.all(np.isnan(r))
+
+
+def test_per_subject_curve_correlation_rejects_mismatched_shapes():
+    with pytest.raises(ValueError):
+        stc.per_subject_curve_correlation(np.zeros((3, 5)), np.zeros((3, 6, 2)))
+
+
+def test_phase_curve_correlation_summary_known_values_match_scipy():
+    r = np.array([0.5, 0.6, 0.4, 0.55, 0.45])
+    result = stc.phase_curve_correlation_summary(r.reshape(-1, 1), ["stageA"])
+    z = np.arctanh(r)
+    t_expected, p_expected = scipy_stats.ttest_1samp(z, 0.0)
+    assert result.loc[0, "n"] == 5
+    assert result.loc[0, "mean_r"] == pytest.approx(r.mean())
+    assert result.loc[0, "t_stat"] == pytest.approx(t_expected)
+    assert result.loc[0, "p_value"] == pytest.approx(p_expected)
+
+
+def test_phase_curve_correlation_summary_fewer_than_three_returns_nan_stats():
+    r_matrix = np.array([[0.5], [np.nan]])
+    result = stc.phase_curve_correlation_summary(r_matrix, ["stageA"])
+    assert result.loc[0, "n"] == 1
+    assert np.isnan(result.loc[0, "t_stat"])
+    assert np.isnan(result.loc[0, "q_value"])
+    assert not result.loc[0, "significant_FDR"]
+
+
+def test_phase_curve_correlation_summary_rejects_column_mismatch():
+    with pytest.raises(ValueError):
+        stc.phase_curve_correlation_summary(np.zeros((5, 2)), ["only_one"])

@@ -219,6 +219,79 @@ def circular_mean_and_resultant(angles: np.ndarray) -> Tuple[float, float]:
     return float(np.arctan2(s, c)), float(np.hypot(c, s))
 
 
+def per_subject_curve_correlation(rate_curves: np.ndarray, stage_curves: np.ndarray) -> np.ndarray:
+    """Per-subject Pearson `r` between a `(n_points,)` curve and each of
+    `n_stages` `(n_points,)` curves, vectorized over subjects and stages.
+
+    `rate_curves` is `(n_subjects, n_points)` (e.g. each subject's event-rate
+    curve resampled onto a common phase grid, see
+    `infraslow.pipeline.phase.resample_bin_rates_to_points`); `stage_curves` is
+    `(n_subjects, n_points, n_stages)`, same subject order and `n_points` grid
+    (e.g. `plot_hypnodensity_isfs_phase.py`'s per-subject continuous
+    phase-locked hypnodensity). Returns `(n_subjects, n_stages)`; NaN wherever
+    either curve is constant (zero variance) for that subject/stage.
+    """
+    rate_curves = np.asarray(rate_curves, dtype=float)
+    stage_curves = np.asarray(stage_curves, dtype=float)
+    if rate_curves.ndim != 2 or stage_curves.ndim != 3 or rate_curves.shape != stage_curves.shape[:2]:
+        raise ValueError(
+            f"rate_curves {rate_curves.shape} and stage_curves {stage_curves.shape} "
+            "must be (n_subjects, n_points) and (n_subjects, n_points, n_stages)"
+        )
+
+    x = rate_curves - rate_curves.mean(axis=1, keepdims=True)
+    y = stage_curves - stage_curves.mean(axis=1, keepdims=True)
+    cov = np.einsum("sp,spk->sk", x, y)
+    x_std = np.sqrt((x ** 2).sum(axis=1))
+    y_std = np.sqrt((y ** 2).sum(axis=1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = cov / (x_std[:, None] * y_std)
+    r[(x_std == 0)[:, None] | (y_std == 0)] = np.nan
+    return r
+
+
+def phase_curve_correlation_summary(r_matrix: np.ndarray, stage_labels: Sequence[str]) -> pd.DataFrame:
+    """Group-level summary of `per_subject_curve_correlation`'s per-subject `r`:
+    a one-sample t-test on Fisher-z(r) per column (H0: mean r == 0), BH-FDR
+    corrected across columns -- mirrors `compare_phase_bins`'s per-bin-test ->
+    FDR-across-bins pattern, but one-sample since there is no second condition
+    to pair against.
+
+    Returns one row per `stage_labels` entry: `stage`, `n` (subjects with a
+    non-NaN `r`), `mean_r`, `sem_r` (`ddof=1`), `t_stat`, `p_value`, `q_value`,
+    `significant_FDR` (`q_value < 0.05`). `t_stat`/`p_value`/`q_value` are NaN
+    when fewer than 3 valid subjects remain for that stage.
+    """
+    r_matrix = np.asarray(r_matrix, dtype=float)
+    if r_matrix.shape[1] != len(stage_labels):
+        raise ValueError(f"r_matrix has {r_matrix.shape[1]} columns, expected {len(stage_labels)}")
+
+    rows = []
+    p_values = []
+    for j, stage in enumerate(stage_labels):
+        r = r_matrix[:, j]
+        r = r[~np.isnan(r)]
+        n = int(r.size)
+        if n < 3:
+            rows.append(dict(stage=stage, n=n, mean_r=float("nan"), sem_r=float("nan"),
+                              t_stat=float("nan"), p_value=float("nan")))
+            p_values.append(float("nan"))
+            continue
+        z = np.arctanh(np.clip(r, -0.999999, 0.999999))
+        t_stat, p_value = stats.ttest_1samp(z, 0.0)
+        rows.append(dict(
+            stage=stage, n=n, mean_r=float(r.mean()), sem_r=float(r.std(ddof=1) / np.sqrt(n)),
+            t_stat=float(t_stat), p_value=float(p_value),
+        ))
+        p_values.append(float(p_value))
+
+    q_values = fdr_correct(p_values)
+    df = pd.DataFrame(rows)
+    df["q_value"] = q_values
+    df["significant_FDR"] = (~np.isnan(q_values)) & (q_values < 0.05)
+    return df
+
+
 __all__ = [
     "mean_sem",
     "describe",
@@ -228,4 +301,6 @@ __all__ = [
     "compare_phase_bins",
     "compare_isfs_metrics",
     "circular_mean_and_resultant",
+    "per_subject_curve_correlation",
+    "phase_curve_correlation_summary",
 ]

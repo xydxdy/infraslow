@@ -246,6 +246,32 @@ def compute_subject_phase_features(
     )
 
 
+def resample_bin_rates_to_points(
+    bin_rates: np.ndarray, bin_centers: np.ndarray, phase_points: np.ndarray,
+) -> np.ndarray:
+    """Circularly linear-interpolate 8 discrete phase-bin values (e.g.
+    `compute_subject_phase_features`'s `phase_bin_rates`, at `bin_centers` ==
+    `bin_center_angle(np.arange(1, 9))`) onto an arbitrary `phase_points` grid in
+    `(-pi, pi]`.
+
+    Wraps one bin from each side across the `-pi`/`pi` seam before `np.interp` so
+    the interpolation is continuous there instead of clamping at the two edges --
+    lets a bin-rate curve be directly compared, point for point, against a
+    continuous phase-locked curve sampled on the same `phase_points` (e.g.
+    `plot_hypnodensity_isfs_phase.py`'s per-subject hypnodensity curve).
+    """
+    bin_rates = np.asarray(bin_rates, dtype=float)
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    phase_points = np.asarray(phase_points, dtype=float)
+
+    order = np.argsort(bin_centers)
+    centers = bin_centers[order]
+    rates = bin_rates[order]
+    ext_centers = np.concatenate([centers[-1:] - 2 * np.pi, centers, centers[:1] + 2 * np.pi])
+    ext_rates = np.concatenate([rates[-1:], rates, rates[:1]])
+    return np.interp(phase_points, ext_centers, ext_rates)
+
+
 def pool_phase_distributions(dists: List[Dict[str, object]]) -> Dict[str, object]:
     """Cohort-level pooling: sum `phase_bin_counts`/`event_count`/`n_in_isfs`
     across subjects and recompute `phase_bin_rates` from the pooled counts
@@ -273,5 +299,6 @@ __all__ = [
     "build_bout_continuous_phase_data",
     "build_subject_continuous_phase_timeseries",
     "compute_subject_phase_features",
+    "resample_bin_rates_to_points",
     "pool_phase_distributions",
 ]

@@ -26,6 +26,17 @@ A subject/state is included in the group figure only if it has both a usable eve
 complete ``--n-phase-points``-point continuous phase coverage (Section 4.2) -- see
 each state's printed usable/excluded counts.
 
+Every subject's result (included or excluded) is written to ``cache/<subject_id>.npz``
+as soon as it's computed (atomic temp-file + rename, so a killed job never leaves a
+corrupt entry). On the next invocation with the same ``--output-dir``/``--event``,
+already-cached subjects are loaded straight from disk instead of being reprocessed --
+so a run interrupted by a timeout, OOM, or any other crash can simply be resubmitted
+and it picks up only the subjects it hadn't gotten to yet. A missing, empty (e.g. a
+0-byte npz left by a previously killed job), or otherwise corrupt per-subject artifact
+excludes just that one subject (or, for a per-state metric, just that one state)
+instead of crashing the run -- see ``_process_subject``. To force a full recompute,
+delete ``<output-dir>/<event>/cache/`` first.
+
 Run via Slurm, not the login node, from this file's own directory (``src/scripts/``)
 with ``src/`` on ``PYTHONPATH`` so ``infraslow`` resolves (the package is not
 pip-installed), e.g.::
@@ -46,7 +57,22 @@ clobbering each other's output:
     exclusions.csv          -- every excluded subject id + categorized reason
     group_stats/{state}.npz -- group_mean, group_sem, phase_points, phase_bin_rates
                                 (subject x 8), bin_centers, n_complete
+    stat_summary_{state}.csv -- per-stage test of whether stage probability tracks the
+                                {event} rate across the ISFS phase cycle: per-subject
+                                Pearson r between the {event}-rate curve (resampled onto
+                                the same phase grid, see infraslow.pipeline.phase.
+                                resample_bin_rates_to_points) and each stage's
+                                phase-locked probability curve, then a one-sample t-test
+                                on Fisher-z(r) across subjects (H0: mean r == 0), BH-FDR
+                                across stages (infraslow.stat.state_comparison.
+                                per_subject_curve_correlation / phase_curve_correlation_summary)
+    usable_subjects_{state}.csv -- subject_id of every subject contributing to that
+                                state's figure/stat_summary (i.e. common_ids)
+    {event}_stage_phase_corr.png/.pdf -- diverging bar chart of stat_summary_{state}'s
+                                mean_r per stage, one panel per state
     summary.txt             -- Section 5's subject-inclusion/usable-count summary
+    cache/{subject_id}.npz  -- one per scanned subject, enables resuming after a
+                                timeout/OOM/crash without reprocessing finished subjects
     progress.log
 """
 
@@ -70,6 +96,7 @@ import yasa
 from infraslow.pipeline import io as pio
 from infraslow.pipeline import phase as pph
 from infraslow.io import usleep_hypnodensity as uh
+from infraslow.stat import state_comparison as stc
 from infraslow.constants import (
     DEFAULT_MIN_BOUT_SEC,
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
@@ -81,6 +108,11 @@ logger = logging.getLogger(__name__)
 plt.rcParams["figure.dpi"] = 110
 PURPLE, LPURPLE = "#5b2a86", "#c9b3e6"
 ORANGE, LORANGE = "#d2691e", "#f2c14e"
+# Diverging pair for the stage-probability-vs-{event}-rate correlation chart (dataviz
+# skill's validated default diverging pair: blue/red, worst adjacent CVD dE 21.6,
+# normal-vision dE 32.3 -- a different color job than PURPLE/ORANGE's half-wave shading
+# above, so kept as its own pair rather than reused).
+CORR_POS, CORR_NEG, CORR_NEUTRAL = "#2a78d6", "#e34948", "#9a9a95"
 
 # Mirrors infraslow.pipeline.pipeline._EVENT_SPECS's "spindle"/"sw" artifact-pathway
 # switch (band + bouts key + bouts loader + summary loader + peak column) -- duplicated
@@ -248,8 +280,11 @@ def _process_subject(
     try:
         data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
                              min_bout_sec=min_bout_sec)
-    except (FileNotFoundError, ValueError, OSError) as exc:
-        return subject_id, False, str(exc), {}, {}
+    except Exception as exc:  # noqa: BLE001 - a missing, empty, or corrupt artifact
+        # (e.g. a 0-byte npz from a killed prior job raises EOFError, not caught by
+        # the FileNotFoundError/ValueError/OSError this used to only catch) excludes
+        # this subject, it must never crash the whole worker pool.
+        return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}
 
     rates: Dict[str, np.ndarray] = {}
     curves: Dict[str, np.ndarray] = {}
@@ -257,13 +292,16 @@ def _process_subject(
         try:
             feats = subject_event_phase_bin_rates(data_dir, subject_id, channel, state,
                                                     event=event, min_bout_sec=min_bout_sec)
-        except (FileNotFoundError, OSError):
+        except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
             feats = None
         if feats is None or sum(feats["phase_bin_rates"]) <= 0:
             continue
         rates[state] = np.asarray(feats["phase_bin_rates"])
 
-        curve = subject_phase_locked_probs_continuous(data, state=state, n_points=n_phase_points)
+        try:
+            curve = subject_phase_locked_probs_continuous(data, state=state, n_points=n_phase_points)
+        except Exception:  # noqa: BLE001 - ditto
+            continue
         if not np.isnan(curve).any():
             curves[state] = curve
 
@@ -281,6 +319,8 @@ def _categorize(reason: str) -> str:
         return "missing_bouts_file"
     if "no usable" in reason:
         return "no_usable_bouts"
+    if "EOFError" in reason or "BadZipFile" in reason or "No data left in file" in reason:
+        return "corrupt_or_empty_file"
     return "other"
 
 
@@ -361,6 +401,119 @@ def build_state_figure(
     return fig
 
 
+def build_correlation_figure(
+    corr_summaries: Dict[str, pd.DataFrame], *, channel: str, event_label: str, stage_order: Sequence[str],
+) -> plt.Figure:
+    """Diverging bar chart of `phase_curve_correlation_summary`'s `mean_r` per stage,
+    one panel per state in `corr_summaries` -- answers "does stage-X probability track
+    (or anti-track) the {event}-rate curve across the ISFS phase cycle?" per stage."""
+    # barh plots its first row at the bottom, so reverse stage_order here to get the
+    # conventional top-to-bottom Wake..REM reading order (stage_order itself, e.g.
+    # USLEEP_STAGE_ORDER, is left in its original order for every other caller).
+    stage_order = list(reversed(stage_order))
+    fig, axes = plt.subplots(1, len(corr_summaries), figsize=(5.5 * len(corr_summaries), 5.2),
+                              sharex=True, sharey=True, squeeze=False)
+    axes = axes[0]
+
+    xlim = max(0.1, float(np.nanmax(np.abs(np.concatenate(
+        [s["mean_r"].to_numpy() for s in corr_summaries.values()]
+    )))) * 1.35)
+
+    for ax, (state, summary) in zip(axes, corr_summaries.items()):
+        summary = summary.set_index("stage").reindex(stage_order)
+        y = np.arange(len(stage_order))
+        colors = [CORR_POS if r >= 0 else CORR_NEG for r in summary["mean_r"]]
+        ax.barh(y, summary["mean_r"], xerr=summary["sem_r"], color=colors,
+                edgecolor="white", linewidth=0.6, height=0.62, capsize=3,
+                error_kw=dict(ecolor=CORR_NEUTRAL, elinewidth=1.0))
+        ax.axvline(0, color=CORR_NEUTRAL, linewidth=1.2, zorder=0)
+
+        for yi, r, n in zip(y, summary["mean_r"], summary["n"]):
+            if np.isnan(r):
+                continue
+            label_x = r + (0.02 * xlim if r >= 0 else -0.02 * xlim)
+            ax.text(label_x, yi, f"{r:+.2f}", va="center", ha="left" if r >= 0 else "right",
+                    fontsize=10, fontweight="bold", color="#2a2a28")
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(stage_order, fontsize=11)
+        ax.set_xlim(-xlim, xlim)
+        ax.set_xlabel(f"correlation r\n({event_label} % vs. stage probability, across ISFS phase)", fontsize=9)
+        n_subjects = int(np.nanmax(summary["n"])) if len(summary) else 0
+        all_sig = bool(summary["significant_FDR"].fillna(False).all())
+        q_note = "all q < 0.05" if all_sig else "see stat_summary CSV for q-values"
+        ax.set_title(f"{state}-restricted phase\n(n = {n_subjects:,} subjects, {q_note})",
+                     fontsize=11, fontweight="bold")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color(CORR_NEUTRAL)
+        ax.tick_params(colors="#4a4a46")
+
+    handles = [
+        Patch(color=CORR_POS, label=f"tracks {event_label} rate (r > 0)"),
+        Patch(color=CORR_NEG, label=f"anti-tracks {event_label} rate (r < 0)"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=10, bbox_to_anchor=(0.5, -0.01))
+    fig.text(0.5, 0.995,
+              f"Does stage probability track {event_label} density across the ISFS phase cycle? ({channel})",
+              ha="center", va="top", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.93,
+              f"per-subject Pearson r ({event_label}-% curve vs. stage-probability curve over the phase cycle),\n"
+              "one-sample t-test on Fisher-z(r), BH-FDR across stages; error bars = SEM",
+              ha="center", va="top", fontsize=9, color="#4a4a46")
+    fig.tight_layout(rect=[0, 0.04, 1, 0.84])
+    return fig
+
+
+# --------------------------------------------------------------------------- #
+# Per-subject checkpoint cache -- lets a resumed run skip subjects a prior,
+# killed/timed-out/OOM'd invocation already finished, instead of reprocessing
+# the whole candidate list from scratch.
+# --------------------------------------------------------------------------- #
+def _cache_path(cache_dir: Path, subject_id: str) -> Path:
+    return cache_dir / f"{subject_id}.npz"
+
+
+def _write_cache(
+    cache_dir: Path, subject_id: str, ok: bool, reason: Optional[str],
+    rates: Dict[str, np.ndarray], curves: Dict[str, np.ndarray],
+) -> None:
+    """Persist one subject's `_process_subject` result, written atomically (temp
+    file + rename) so a job killed mid-write never leaves a corrupt cache entry
+    that a later resume would have to guard against."""
+    payload = {"ok": np.array(ok), "reason": np.array(reason or "")}
+    for state, arr in rates.items():
+        payload[f"rates_{state}"] = arr
+    for state, arr in curves.items():
+        payload[f"curves_{state}"] = arr
+    # Must already end in ".npz" -- np.savez silently appends ".npz" to any filename
+    # that doesn't, which would otherwise write "<subject_id>.tmp.npz" while this
+    # variable still points at "<subject_id>.npz.tmp", breaking the rename below.
+    tmp_path = cache_dir / f"{subject_id}.tmp.npz"
+    np.savez(tmp_path, **payload)
+    tmp_path.replace(_cache_path(cache_dir, subject_id))
+
+
+def _read_cache(
+    cache_dir: Path, subject_id: str, states: Sequence[str],
+) -> Optional[Tuple[bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
+    """This subject's cached `_process_subject` result, or `None` if there is no
+    cache entry yet -- or it's unreadable (e.g. left mid-write by a killed job
+    before the atomic rename in `_write_cache` took effect), in which case the
+    subject is simply reprocessed instead of failing the whole run."""
+    path = _cache_path(cache_dir, subject_id)
+    if not path.exists():
+        return None
+    try:
+        with np.load(path) as npz:
+            ok = bool(npz["ok"])
+            reason = str(npz["reason"][()]) or None
+            rates = {s: npz[f"rates_{s}"] for s in states if f"rates_{s}" in npz.files}
+            curves = {s: npz[f"curves_{s}"] for s in states if f"curves_{s}" in npz.files}
+        return ok, reason, rates, curves
+    except Exception:  # noqa: BLE001 - corrupt/partial cache entry -- reprocess, don't crash
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -372,6 +525,8 @@ def main() -> None:
     args.output_dir = args.output_dir / args.event
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "group_stats").mkdir(parents=True, exist_ok=True)
+    cache_dir = args.output_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -404,18 +559,44 @@ def main() -> None:
             if n_subjects is not None and len(included) >= n_subjects:
                 break
             chunk = candidates[start:start + chunk_size]
-            tasks = [
-                (sid, args.data_dir, args.usleep_dir, args.channel, states, args.event,
-                 args.min_bout_sec, args.n_phase_points)
-                for sid in chunk
-            ]
-            for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):
+
+            # Subjects a prior (killed/timed-out/OOM'd) run already finished are
+            # served straight from cache/, never resubmitted to the pool -- this is
+            # what makes a resumed run only process subjects "not yet run".
+            to_process = []
+            n_from_cache = 0
+            for sid in chunk:
+                cached = _read_cache(cache_dir, sid, states)
+                if cached is None:
+                    to_process.append(sid)
+                    continue
+                ok, reason, rates, curves = cached
                 n_scanned += 1
+                n_from_cache += 1
                 if ok:
-                    included[subject_id] = (rates, curves)
+                    included[sid] = (rates, curves)
                 else:
-                    exclusion_reasons[subject_id] = reason
-            logger.info(f"scanned {n_scanned}; included {len(included)}/{n_subjects or '?'} so far")
+                    exclusion_reasons[sid] = reason
+
+            if to_process:
+                tasks = [
+                    (sid, args.data_dir, args.usleep_dir, args.channel, states, args.event,
+                     args.min_bout_sec, args.n_phase_points)
+                    for sid in to_process
+                ]
+                for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):
+                    n_scanned += 1
+                    # Written immediately, one subject at a time, so a crash/OOM/timeout
+                    # partway through this chunk only costs the in-flight subjects, not
+                    # the ones already finished.
+                    _write_cache(cache_dir, subject_id, ok, reason, rates, curves)
+                    if ok:
+                        included[subject_id] = (rates, curves)
+                    else:
+                        exclusion_reasons[subject_id] = reason
+
+            logger.info(f"scanned {n_scanned}; included {len(included)}/{n_subjects or '?'} so far "
+                        f"({n_from_cache} from cache this chunk)")
 
     subject_ids = list(included)
     if n_subjects is not None:
@@ -439,6 +620,8 @@ def main() -> None:
     event_label = _EVENT_SPECS[args.event]["event_label"]
 
     state_summary: Dict[str, Dict[str, int]] = {}
+    corr_summaries: Dict[str, pd.DataFrame] = {}
+    stage_order = list(USLEEP_STAGE_ORDER)
 
     for state in states:
         rates_by_sid = {sid: included[sid][0][state] for sid in subject_ids if state in included[sid][0]}
@@ -472,6 +655,24 @@ def main() -> None:
             n_complete=len(common_ids), subject_ids=np.asarray(common_ids),
         )
 
+        # Does stage probability track (or anti-track) the event-rate curve across the
+        # ISFS phase cycle? Per-subject Pearson r (event-rate curve, resampled onto the
+        # same phase_points grid, vs. each stage's own phase-locked probability curve --
+        # group_stack is already that curve stack), then a group-level one-sample test.
+        rate_curves = np.stack([
+            pph.resample_bin_rates_to_points(rates_by_sid[sid], bin_centers, phase_points)
+            for sid in common_ids
+        ])
+        r_matrix = stc.per_subject_curve_correlation(rate_curves, group_stack)
+        corr_summary = stc.phase_curve_correlation_summary(r_matrix, stage_order)
+        corr_summary.to_csv(args.output_dir / f"stat_summary_{state}.csv", index=False)
+        logger.info(f"{state}: saved stat_summary_{state}.csv\n" + corr_summary.to_string(index=False))
+        corr_summaries[state] = corr_summary
+
+        pd.DataFrame({"subject_id": common_ids}).to_csv(
+            args.output_dir / f"usable_subjects_{state}.csv", index=False
+        )
+
         fig = build_state_figure(
             state, channel=args.channel, event_label=event_label, group_mean=group_mean,
             n_complete=len(common_ids), phase_points=phase_points, bin_centers=bin_centers,
@@ -485,6 +686,16 @@ def main() -> None:
         fig.savefig(png_path)
         plt.close(fig)
         logger.info(f"saved {state} figure to {pdf_path} and {png_path}")
+
+    corr_fig = build_correlation_figure(
+        corr_summaries, channel=args.channel, event_label=event_label, stage_order=stage_order,
+    )
+    corr_png_path = args.output_dir / f"{args.event}_stage_phase_corr.png"
+    corr_pdf_path = args.output_dir / f"{args.event}_stage_phase_corr.pdf"
+    corr_fig.savefig(corr_png_path, dpi=150, bbox_inches="tight")
+    corr_fig.savefig(corr_pdf_path, bbox_inches="tight")
+    plt.close(corr_fig)
+    logger.info(f"saved stage/phase correlation figure to {corr_png_path} and {corr_pdf_path}")
 
     summary_lines = [
         "=== Subject inclusion summary ===",
