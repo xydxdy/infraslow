@@ -1,16 +1,26 @@
 #!/usr/bin/env python
 """Pre-transition variant of plot_hypnodensity_isfs_phase.py: restricts every
 N2/N3 bout to just its last --window-sec seconds (default 200s), and only
-keeps bouts that end in a real transition to a different scored sleep stage
--- see infraslow.pipeline.transitions.select_transition_tails. Non-transition
-bouts (followed by more of the same stage, or the last bout of the
-recording) are dropped entirely, not truncated -- see
+keeps bouts that end in a real, SUSTAINED transition to a different scored
+sleep stage -- see infraslow.pipeline.transitions.select_transition_tails.
+`find_stage_bouts` builds each bout as a *maximal* run of same-stage epochs,
+so the epoch right after any bout's end already differs from the bout's own
+stage by construction -- checking only that one epoch is therefore not a
+meaningful filter (true for nearly every bout). --persist-sec (default 60s)
+is what actually distinguishes a lasting transition from a single-epoch
+scoring blip that reverts right back (which shows up as two adjacent,
+same-stage bouts under find_stage_bouts's maximal-run construction, not one
+bout followed by "more of the same stage"): the new stage must hold for at
+least --persist-sec seconds after the bout's end (or through to the end of
+the scored night, if less remains) without reverting to the bout's own
+stage. Non-transition and too-short bouts are dropped entirely, not
+truncated -- see
 docs/superpowers/specs/2026-08-22-hypnodensity-isfs-phase-transition-design.md.
 
 Everything except bout selection is unchanged from plot_hypnodensity_isfs_phase.py
 and is imported from it directly: subject_phase_locked_probs_continuous,
 build_state_figure, build_correlation_figure, _EVENT_SPECS, _mean_sem,
-_cache_path, _write_cache, _read_cache. Only load_subject,
+_write_cache, _read_cache. Only load_subject,
 subject_event_phase_bin_rates, _process_subject, and _categorize are
 reimplemented here, since the original inlines bout-loading exactly where
 this script must change it. Requires plot_hypnodensity_isfs_phase.py to sit
@@ -30,9 +40,11 @@ Saves the same files as plot_hypnodensity_isfs_phase.py (see that script's
 module docstring for the full list), under --output-dir/--event, but
 --output-dir defaults to $SCRATCH/outputs/hypnodensity_isfs_phase_transition
 -- a different root, so this never collides with the original's production
-outputs. Changing --window-sec between runs against the same --output-dir
-requires deleting cache/ first to force a recompute (same caveat the
-original already documents for --n-phase-points/--min-bout-sec).
+outputs. cache/ is namespaced by --window-sec and --persist-sec (e.g.
+cache/w200_p60/) so switching either parameter against the same --output-dir
+never silently reuses a prior parameter combination's results (same caveat
+the original documents for --n-phase-points/--min-bout-sec, but enforced
+here rather than left to the operator to remember).
 """
 from __future__ import annotations
 
@@ -63,7 +75,6 @@ from infraslow.constants import (
 )
 from plot_hypnodensity_isfs_phase import (
     _EVENT_SPECS,
-    _cache_path,
     _mean_sem,
     _read_cache,
     _write_cache,
@@ -75,6 +86,20 @@ from plot_hypnodensity_isfs_phase import (
 logger = logging.getLogger(__name__)
 
 plt.rcParams["figure.dpi"] = 110
+
+#: Pre-transition tail length -- deliberately a local constant, not
+#: infraslow.constants.DEFAULT_WINDOW_SEC (an unrelated ISFS-spectrum
+#: frequency-grid constant of the same generic name) or DEFAULT_MIN_BOUT_SEC
+#: (a different, coincidentally-equal-valued knob) -- so changing either of
+#: those elsewhere in the codebase can never silently move this default.
+DEFAULT_TRANSITION_WINDOW_SEC = 200.0
+#: Minimum time (s) the new stage must persist after a bout's end, without
+#: reverting to the bout's own stage, to count as a real transition -- see
+#: infraslow.pipeline.transitions.is_transition_bout. 60s (2 epochs at the
+#: scored hypnogram's 30s resolution) filters out a single-epoch scoring
+#: blip that reverts right back, without requiring an implausibly long
+#: stable stretch.
+DEFAULT_TRANSITION_PERSIST_SEC = 60.0
 
 
 # --------------------------------------------------------------------------- #
@@ -110,10 +135,18 @@ def parse_args() -> argparse.Namespace:
                     help="Minimum consecutive-stage bout length (s) before transition "
                          "selection (env: MIN_BOUT_SEC)")
     p.add_argument("--window-sec", type=float,
-                    default=float(_env_str("WINDOW_SEC", str(DEFAULT_MIN_BOUT_SEC))),
+                    default=float(_env_str("TRANSITION_WINDOW_SEC", str(DEFAULT_TRANSITION_WINDOW_SEC))),
                     help="Pre-transition tail length (s): a bout must be at least this "
-                         "long and end in a real stage transition to be included, and "
-                         "only its last --window-sec seconds are used (env: WINDOW_SEC)")
+                         "long and end in a real, sustained stage transition to be "
+                         "included, and only its last --window-sec seconds are used "
+                         "(env: TRANSITION_WINDOW_SEC)")
+    p.add_argument("--persist-sec", type=float,
+                    default=float(_env_str("TRANSITION_PERSIST_SEC", str(DEFAULT_TRANSITION_PERSIST_SEC))),
+                    help="Minimum time (s) the new stage must persist after a bout's "
+                         "end, without reverting back to the bout's own stage, to "
+                         "count as a real transition rather than a single-epoch "
+                         "scoring blip -- see infraslow.pipeline.transitions."
+                         "is_transition_bout (env: TRANSITION_PERSIST_SEC)")
     p.add_argument("--n-phase-points", type=int, default=50,
                     help="Resolution of the continuous phase-locked group curve")
     p.add_argument("--n-subjects", type=int, default=100,
@@ -139,7 +172,8 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
                   states: Sequence[str], band: str, stage_epochs: np.ndarray, epoch_sec: float, *,
-                  window_sec: float, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC) -> dict:
+                  window_sec: float, persist_epochs: int,
+                  min_bout_sec: float = DEFAULT_MIN_BOUT_SEC) -> dict:
     """Same contract as `plot_hypnodensity_isfs_phase.load_subject`, but each
     state's bouts are first reduced to their pre-transition tails via
     `infraslow.pipeline.transitions.select_transition_tails` before the phase
@@ -160,7 +194,8 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
         if bouts.shape[0]:
             durations = bouts[:, 1] - bouts[:, 0]
             bouts = bouts[durations >= min_bout_sec]
-        bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec)
+        bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec,
+                                             persist_epochs=persist_epochs)
         if bouts.shape[0]:
             series = pph.build_subject_phase_timeseries(t_env, filtered, bouts)
             if series["t"].size:
@@ -180,7 +215,7 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
 
 def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str, state: str,
                                    stage_epochs: np.ndarray, epoch_sec: float, *,
-                                   event: str, window_sec: float,
+                                   event: str, window_sec: float, persist_epochs: int,
                                    min_bout_sec: float = DEFAULT_MIN_BOUT_SEC):
     """Same contract as `plot_hypnodensity_isfs_phase.subject_event_phase_bin_rates`,
     restricted to this state's pre-transition-tail bouts."""
@@ -190,7 +225,8 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
     if bouts.shape[0]:
         durations = bouts[:, 1] - bouts[:, 0]
         bouts = bouts[durations >= min_bout_sec]
-    bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec)
+    bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec,
+                                         persist_epochs=persist_epochs)
     if bouts.shape[0] == 0:
         return None
 
@@ -204,14 +240,14 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
 
 
 def _process_subject(
-    task: Tuple[str, Path, str, str, str, Tuple[str, ...], str, float, float, int],
+    task: Tuple[str, Path, str, str, str, Tuple[str, ...], str, float, float, float, int],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Same contract as `plot_hypnodensity_isfs_phase._process_subject`, but
     loads this subject's scored hypnogram once (`load_subject_hypnogram`) and
     threads it through both `load_subject` and `subject_event_phase_bin_rates`
     so the raw Hypnodensity CSV is only read once per subject."""
     (subject_id, data_dir, usleep_dir, hypno_dir, channel, states, event,
-     min_bout_sec, window_sec, n_phase_points) = task
+     min_bout_sec, window_sec, persist_sec, n_phase_points) = task
     band = _EVENT_SPECS[event]["band"]
 
     try:
@@ -221,10 +257,17 @@ def _process_subject(
         # crash the whole worker pool.
         return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}
 
+    # >= 1 always -- persist_sec=0 would otherwise pass persist_epochs=0 to
+    # select_transition_tails, which is_transition_bout treats identically to 1
+    # (see its own max(1, persist_epochs) clamp), so this keeps the two call
+    # sites' effective behavior visibly in sync at the point persist_epochs is
+    # computed, not hidden inside a second clamp downstream.
+    persist_epochs = max(1, int(round(persist_sec / epoch_sec)))
+
     try:
         data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
                              stage_epochs, epoch_sec, window_sec=window_sec,
-                             min_bout_sec=min_bout_sec)
+                             persist_epochs=persist_epochs, min_bout_sec=min_bout_sec)
     except Exception as exc:  # noqa: BLE001 - see plot_hypnodensity_isfs_phase._process_subject
         return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}
 
@@ -234,7 +277,8 @@ def _process_subject(
         try:
             feats = subject_event_phase_bin_rates(
                 data_dir, subject_id, channel, state, stage_epochs, epoch_sec,
-                event=event, window_sec=window_sec, min_bout_sec=min_bout_sec,
+                event=event, window_sec=window_sec, persist_epochs=persist_epochs,
+                min_bout_sec=min_bout_sec,
             )
         except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
             feats = None
@@ -278,7 +322,9 @@ def main() -> None:
     args.output_dir = args.output_dir / args.event
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "group_stats").mkdir(parents=True, exist_ok=True)
-    cache_dir = args.output_dir / "cache"
+    # Namespaced by window_sec/persist_sec so switching either parameter against the
+    # same --output-dir can never silently reuse a prior parameter combination's cache.
+    cache_dir = args.output_dir / "cache" / f"w{args.window_sec:g}_p{args.persist_sec:g}"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
@@ -300,8 +346,8 @@ def main() -> None:
         candidates = candidates[: args.limit]
     logger.info(f"{len(candidates)} candidate subject(s) under {args.data_dir}; "
                 f"channel={args.channel} states={states} event={args.event!r} "
-                f"window_sec={args.window_sec} n_subjects={n_subjects or 'unlimited'} "
-                f"workers={workers}")
+                f"window_sec={args.window_sec} persist_sec={args.persist_sec} "
+                f"n_subjects={n_subjects or 'unlimited'} workers={workers}")
 
     included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]] = {}
     exclusion_reasons: Dict[str, str] = {}
@@ -332,7 +378,8 @@ def main() -> None:
             if to_process:
                 tasks = [
                     (sid, args.data_dir, args.usleep_dir, args.hypno_dir, args.channel, states,
-                     args.event, args.min_bout_sec, args.window_sec, args.n_phase_points)
+                     args.event, args.min_bout_sec, args.window_sec, args.persist_sec,
+                     args.n_phase_points)
                     for sid in to_process
                 ]
                 for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):
@@ -451,7 +498,7 @@ def main() -> None:
             summary_lines.append(f"  {reason}: {count}")
     summary_lines.append(
         f"\nEVENT = {args.event!r} ({event_label}, band={_EVENT_SPECS[args.event]['band']!r}), "
-        f"WINDOW_SEC = {args.window_sec}"
+        f"WINDOW_SEC = {args.window_sec}, PERSIST_SEC = {args.persist_sec}"
     )
 
     summary_lines.append(f"\n{args.event} transition-tail phase-bin distribution usable/excluded, out of "

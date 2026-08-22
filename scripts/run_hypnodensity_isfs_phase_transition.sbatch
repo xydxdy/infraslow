@@ -11,8 +11,10 @@
 # Runs src/scripts/plot_hypnodensity_isfs_phase_transition.py: same group-level
 # U-Sleep stage probability / event phase-bin analysis as
 # run_hypnodensity_isfs_phase.sbatch, but restricted to each N2/N3 bout's last
-# WINDOW_SEC seconds before a real transition to a different scored sleep stage
-# (see plot_hypnodensity_isfs_phase_transition.py's module docstring and
+# TRANSITION_WINDOW_SEC seconds before a real, sustained transition (the new
+# stage must persist >= TRANSITION_PERSIST_SEC without reverting) to a
+# different scored sleep stage (see plot_hypnodensity_isfs_phase_transition.py's
+# module docstring and
 # docs/superpowers/specs/2026-08-22-hypnodensity-isfs-phase-transition-design.md).
 # --mem is 40GB, not the original job's 32GB -- that job's two most recent full
 # runs both hit exactly 100% of their 32GB request (no headroom to copy as-is).
@@ -40,7 +42,8 @@ HYPNO_DIR="${HYPNO_DIR:-$OAK/psg/Bioserenity/Sleep_Staging}"
 CHANNEL="${CHANNEL:-C3}"
 STATES="${STATES:-N2 N3}"
 EVENT="${EVENT:-sw}"
-WINDOW_SEC="${WINDOW_SEC:-200}"
+TRANSITION_WINDOW_SEC="${TRANSITION_WINDOW_SEC:-200}"
+TRANSITION_PERSIST_SEC="${TRANSITION_PERSIST_SEC:-60}"
 N_PHASE_POINTS="${N_PHASE_POINTS:-50}"
 N_SUBJECTS="${N_SUBJECTS:-0}"
 LIMIT="${LIMIT:-}"
@@ -60,7 +63,8 @@ python3 plot_hypnodensity_isfs_phase_transition.py \
     --channel "$CHANNEL" \
     --states $STATES \
     --event "$EVENT" \
-    --window-sec "$WINDOW_SEC" \
+    --window-sec "$TRANSITION_WINDOW_SEC" \
+    --persist-sec "$TRANSITION_PERSIST_SEC" \
     --n-phase-points "$N_PHASE_POINTS" \
     --n-subjects "$N_SUBJECTS" \
     --workers "${SLURM_CPUS_PER_TASK:-1}" \
