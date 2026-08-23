@@ -20,11 +20,11 @@ docs/superpowers/specs/2026-08-22-hypnodensity-isfs-phase-transition-design.md.
 Everything except bout selection is unchanged from plot_hypnodensity_isfs_phase.py
 and is imported from it directly: subject_phase_locked_probs_continuous,
 build_state_figure, build_correlation_figure, _EVENT_SPECS, _mean_sem,
-_write_cache, _read_cache. Only load_subject,
-subject_event_phase_bin_rates, _process_subject, and _categorize are
-reimplemented here, since the original inlines bout-loading exactly where
-this script must change it. Requires plot_hypnodensity_isfs_phase.py to sit
-in the same directory (relies on Python adding the invoked script's own
+_write_cache, _read_cache. Only _destination_stages, _rates_for_bouts,
+_curve_for_bouts, _process_subject, and _categorize are reimplemented
+here, since the original inlines bout-loading exactly where this script
+must change it. Requires plot_hypnodensity_isfs_phase.py to sit in the
+same directory (relies on Python adding the invoked script's own
 directory to sys.path[0]) -- run this from src/scripts/, same as the original.
 
 Run via Slurm, not the login node, from this file's own directory
@@ -55,10 +55,11 @@ N2_to_Wake, N2_to_N1, N2_to_N3, N2_to_REM, and the analogous N3_to_x pairs)
 -- same file shape as the pooled output, one directory per pair:
 hypnodensity_isfs_phase_{pair}.pdf/png, group_stats/{pair}.npz,
 stat_summary_{pair}.csv, usable_subjects_{pair}.csv,
-{event}_stage_phase_corr.png/pdf. A pair with zero usable subjects is
-skipped (logged as a warning, not an error) rather than producing an empty
-or broken figure -- see summary.txt's "Per-destination-stage breakdown"
-section for which pairs were skipped. See
+{event}_stage_phase_corr.png/pdf. A pair with zero usable subjects, or with
+usable rates but no subject reaching complete phase coverage, is skipped
+(logged as a warning, not an error) rather than producing an empty or
+broken figure -- see summary.txt's "Per-destination-stage breakdown"
+section, which records the specific reason for every skipped pair. See
 docs/superpowers/specs/2026-08-22-hypnodensity-isfs-phase-transition-pairwise-design.md.
 """
 from __future__ import annotations
@@ -334,7 +335,9 @@ def _process_subject(
             )
             try:
                 r = _rates_for_bouts(t_env, filtered, tail_event, event_times)
-            except Exception:  # noqa: BLE001 - same as above, scoped to this key only
+            except Exception as exc:  # noqa: BLE001 - same as above, scoped to this key only
+                logger.warning(f"{subject_id}/{key}: rates computation failed: "
+                                f"{type(exc).__name__}: {exc}")
                 r = None
             if r is None:
                 continue
@@ -342,10 +345,12 @@ def _process_subject(
 
             try:
                 curve = _curve_for_bouts(
-                    t_env, filtered, tail_all_by_key.get(key, np.empty((0, 2))),
+                    t_env, filtered, tail_all_by_key[key],
                     t_hyp, probs, n_phase_points, key,
                 )
-            except Exception:  # noqa: BLE001 - ditto
+            except Exception as exc:  # noqa: BLE001 - ditto
+                logger.warning(f"{subject_id}/{key}: curve computation failed: "
+                                f"{type(exc).__name__}: {exc}")
                 continue
             if curve is not None:
                 curves[key] = curve
@@ -545,7 +550,7 @@ def main() -> None:
     plt.close(corr_fig)
     logger.info(f"saved stage/phase correlation figure to {corr_png_path} and {corr_pdf_path}")
 
-    pair_summary: Dict[str, Optional[int]] = {}
+    pair_summary: Dict[str, str] = {}
     for state in states:
         for to_state in _destination_stages(state):
             pair_key = f"{state}_to_{to_state}"
@@ -557,7 +562,7 @@ def main() -> None:
             if not rates_by_sid:
                 logger.warning(f"{pair_label}: 0/{len(subject_ids)} subjects have a usable "
                                 f"{args.event} transition-tail phase distribution -- skipping this pair")
-                pair_summary[pair_key] = None
+                pair_summary[pair_key] = "skipped (0 usable subjects)"
                 continue
 
             common_ids = sorted(curves_by_sid)
@@ -565,7 +570,10 @@ def main() -> None:
                 logger.warning(f"{pair_label}: {len(rates_by_sid)} subjects have usable rates but "
                                 f"none have complete {args.n_phase_points}-point phase coverage -- "
                                 "skipping this pair")
-                pair_summary[pair_key] = None
+                pair_summary[pair_key] = (
+                    f"skipped ({len(rates_by_sid)} with rates, 0 with complete "
+                    f"{args.n_phase_points}-point coverage)"
+                )
                 continue
 
             pair_dir = args.output_dir / "by_destination" / pair_key
@@ -622,7 +630,7 @@ def main() -> None:
             logger.info(f"saved {pair_label} stage/phase correlation figure to "
                         f"{corr_png_path} and {corr_pdf_path}")
 
-            pair_summary[pair_key] = len(common_ids)
+            pair_summary[pair_key] = f"{len(common_ids)}/{len(subject_ids)}"
 
     summary_lines = [
         "=== Subject inclusion summary ===",
@@ -663,11 +671,7 @@ def main() -> None:
     for state in states:
         for to_state in _destination_stages(state):
             pair_key = f"{state}_to_{to_state}"
-            n = pair_summary.get(pair_key)
-            if n is None:
-                summary_lines.append(f"  {state}->{to_state}: skipped (0 usable subjects)")
-            else:
-                summary_lines.append(f"  {state}->{to_state}: {n}/{len(subject_ids)}")
+            summary_lines.append(f"  {state}->{to_state}: {pair_summary[pair_key]}")
 
     summary_text = "\n".join(summary_lines) + "\n"
     (args.output_dir / "summary.txt").write_text(summary_text)
