@@ -26,6 +26,8 @@ version).
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 
@@ -49,25 +51,50 @@ def is_transition_bout(
     return bool(np.all(window != current_state.strip().upper()))
 
 
+def transition_target_stage(
+    stop: float, stage_epochs: np.ndarray, epoch_sec: float,
+) -> Optional[str]:
+    """Scored stage (upper-cased) at the epoch immediately after `stop`, or
+    `None` if there is no next epoch (bout ran to the end of the scored
+    night) -- the same epoch `is_transition_bout` inspects first, exposed so
+    callers can label *which* stage a real transition goes to, not just that
+    one occurred."""
+    idx = int(round(stop / epoch_sec))
+    if idx < 0 or idx >= len(stage_epochs):
+        return None
+    return str(stage_epochs[idx]).strip().upper()
+
+
 def select_transition_tails(
     bouts: np.ndarray, stage_epochs: np.ndarray, epoch_sec: float,
     current_state: str, window_sec: float, *, persist_epochs: int = 1,
+    to_state: Optional[str] = None,
 ) -> np.ndarray:
     """`bouts` (n,2) that both last >= `window_sec` and end in a real,
     sustained transition (`is_transition_bout`, `persist_epochs`), each
     replaced by its own last `window_sec` seconds: `(stop - window_sec,
     stop)`. Every other bout (too short, or not a real transition) is
     dropped, not truncated. Bout order is preserved. Returns a `(m, 2)`
-    array, `m <= n` (empty `(0, 2)` if none qualify)."""
+    array, `m <= n` (empty `(0, 2)` if none qualify).
+
+    If `to_state` is given, a bout is additionally required to transition
+    specifically into that stage (`transition_target_stage(stop, ...) ==
+    to_state.strip().upper()`) -- lets a caller break "any transition" down
+    by destination, e.g. N2->Wake vs N2->N1. `to_state=None` (the default)
+    preserves the original "any differing destination" behavior.
+    """
     bouts = np.asarray(bouts, dtype=float).reshape(-1, 2)
+    to_state_norm = to_state.strip().upper() if to_state is not None else None
     kept = []
     for a, b in bouts:
         if (b - a) < window_sec:
             continue
         if not is_transition_bout(b, stage_epochs, epoch_sec, current_state, persist_epochs):
             continue
+        if to_state_norm is not None and transition_target_stage(b, stage_epochs, epoch_sec) != to_state_norm:
+            continue
         kept.append((b - window_sec, b))
     return np.asarray(kept, dtype=float).reshape(-1, 2)
 
 
-__all__ = ["is_transition_bout", "select_transition_tails"]
+__all__ = ["is_transition_bout", "transition_target_stage", "select_transition_tails"]

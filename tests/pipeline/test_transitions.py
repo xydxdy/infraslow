@@ -112,3 +112,61 @@ def test_select_transition_tails_against_real_find_stage_bouts_output():
     )
     assert out.shape[0] == 1
     assert np.allclose(out[0], [bouts[1][1] - 200.0, bouts[1][1]])
+
+
+def test_transition_target_stage_returns_next_epoch_stage():
+    stage_epochs = np.array(["N2", "N2", "N3", "N3"])
+    assert ptr.transition_target_stage(60.0, stage_epochs, 30.0) == "N3"
+
+
+def test_transition_target_stage_none_at_end_of_scored_night():
+    stage_epochs = np.array(["N2", "N2"])  # stop=60 -> idx=2, out of range
+    assert ptr.transition_target_stage(60.0, stage_epochs, 30.0) is None
+
+
+def test_transition_target_stage_uppercases_and_strips():
+    stage_epochs = np.array(["N2", "N2", " rem "])
+    assert ptr.transition_target_stage(60.0, stage_epochs, 30.0) == "REM"
+
+
+def test_select_transition_tails_to_state_keeps_only_matching_destination():
+    # idx 0-9 N2, idx 10-19 N3, idx 20-29 N2, idx 30-39 REM
+    stage_epochs = np.array(["N2"] * 10 + ["N3"] * 10 + ["N2"] * 10 + ["REM"] * 10)
+    bouts = np.array([
+        [0.0, 300.0],    # stop=300 -> idx=10 -> "N3"
+        [600.0, 900.0],  # stop=900 -> idx=30 -> "REM"
+    ])
+    out = ptr.select_transition_tails(
+        bouts, stage_epochs, 30.0, "N2", window_sec=200.0, to_state="N3",
+    )
+    assert out.shape == (1, 2)
+    assert np.allclose(out[0], [100.0, 300.0])
+
+
+def test_select_transition_tails_to_state_none_matches_any_destination():
+    stage_epochs = np.array(["N2"] * 10 + ["N3"] * 10 + ["N2"] * 10 + ["REM"] * 10)
+    bouts = np.array([[0.0, 300.0], [600.0, 900.0]])
+    out_default = ptr.select_transition_tails(bouts, stage_epochs, 30.0, "N2", window_sec=200.0)
+    out_explicit_none = ptr.select_transition_tails(
+        bouts, stage_epochs, 30.0, "N2", window_sec=200.0, to_state=None,
+    )
+    assert out_default.shape == (2, 2)
+    assert np.array_equal(out_default, out_explicit_none)
+
+
+def test_select_transition_tails_to_state_no_matching_destination_returns_empty():
+    stage_epochs = np.array(["N2"] * 10 + ["N3"] * 10)
+    bouts = np.array([[0.0, 300.0]])  # stop=300 -> idx=10 -> "N3"
+    out = ptr.select_transition_tails(
+        bouts, stage_epochs, 30.0, "N2", window_sec=200.0, to_state="REM",
+    )
+    assert out.shape == (0, 2)
+
+
+def test_select_transition_tails_to_state_case_insensitive():
+    stage_epochs = np.array(["N2"] * 10 + ["N3"] * 10)
+    bouts = np.array([[0.0, 300.0]])
+    out = ptr.select_transition_tails(
+        bouts, stage_epochs, 30.0, "N2", window_sec=200.0, to_state="n3",
+    )
+    assert out.shape == (1, 2)
