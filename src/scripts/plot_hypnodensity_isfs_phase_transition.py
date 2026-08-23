@@ -279,8 +279,10 @@ def _process_subject(
                 )
                 key = state if to_state is None else f"{state}_to_{to_state}"
                 tail_all_by_key[key] = tail
-                if tail.shape[0]:
-                    any_bouts = True
+                if to_state is None and tail.shape[0]:
+                    series = pph.build_subject_phase_timeseries(t_env, filtered, tail)
+                    if series["t"].size:
+                        any_bouts = True
 
         if not any_bouts:
             raise ValueError(
@@ -315,15 +317,21 @@ def _process_subject(
                 raw_event, stage_epochs, epoch_sec, state, window_sec,
                 persist_epochs=persist_epochs, to_state=to_state,
             )
-            r = _rates_for_bouts(t_env, filtered, tail_event, event_times)
+            try:
+                r = _rates_for_bouts(t_env, filtered, tail_event, event_times)
+            except Exception:  # noqa: BLE001 - same as above, scoped to this key only
+                r = None
             if r is None:
                 continue
             rates[key] = r
 
-            curve = _curve_for_bouts(
-                t_env, filtered, tail_all_by_key.get(key, np.empty((0, 2))),
-                t_hyp, probs, n_phase_points, key,
-            )
+            try:
+                curve = _curve_for_bouts(
+                    t_env, filtered, tail_all_by_key.get(key, np.empty((0, 2))),
+                    t_hyp, probs, n_phase_points, key,
+                )
+            except Exception:  # noqa: BLE001 - ditto
+                continue
             if curve is not None:
                 curves[key] = curve
 
