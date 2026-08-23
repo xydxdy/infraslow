@@ -40,11 +40,26 @@ Saves the same files as plot_hypnodensity_isfs_phase.py (see that script's
 module docstring for the full list), under --output-dir/--event, but
 --output-dir defaults to $SCRATCH/outputs/hypnodensity_isfs_phase_transition
 -- a different root, so this never collides with the original's production
-outputs. cache/ is namespaced by --window-sec and --persist-sec (e.g.
-cache/w200_p60/) so switching either parameter against the same --output-dir
-never silently reuses a prior parameter combination's results (same caveat
-the original documents for --n-phase-points/--min-bout-sec, but enforced
-here rather than left to the operator to remember).
+outputs. cache/ is namespaced by --window-sec, --persist-sec, and a fixed
+"pairwise" segment (e.g. cache/w200_p60/pairwise/) so switching either
+parameter, or upgrading from a pre-per-destination-breakdown version of this
+script, against the same --output-dir never silently reuses a prior/
+incompatible result set (same caveat the original documents for
+--n-phase-points/--min-bout-sec, but enforced here rather than left to the
+operator to remember).
+
+Additionally saves a per-destination-stage breakdown under
+--output-dir/--event/by_destination/{state}_to_{to_state}/ for every
+USLEEP_STAGE_ORDER destination other than the source state (e.g.
+N2_to_Wake, N2_to_N1, N2_to_N3, N2_to_REM, and the analogous N3_to_x pairs)
+-- same file shape as the pooled output, one directory per pair:
+hypnodensity_isfs_phase_{pair}.pdf/png, group_stats/{pair}.npz,
+stat_summary_{pair}.csv, usable_subjects_{pair}.csv,
+{event}_stage_phase_corr.png/pdf. A pair with zero usable subjects is
+skipped (logged as a warning, not an error) rather than producing an empty
+or broken figure -- see summary.txt's "Per-destination-stage breakdown"
+section for which pairs were skipped. See
+docs/superpowers/specs/2026-08-22-hypnodensity-isfs-phase-transition-pairwise-design.md.
 """
 from __future__ import annotations
 
@@ -366,7 +381,7 @@ def main() -> None:
     (args.output_dir / "group_stats").mkdir(parents=True, exist_ok=True)
     # Namespaced by window_sec/persist_sec so switching either parameter against the
     # same --output-dir can never silently reuse a prior parameter combination's cache.
-    cache_dir = args.output_dir / "cache" / f"w{args.window_sec:g}_p{args.persist_sec:g}"
+    cache_dir = args.output_dir / "cache" / f"w{args.window_sec:g}_p{args.persist_sec:g}" / "pairwise"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
@@ -380,6 +395,8 @@ def main() -> None:
     )
 
     states = tuple(args.states)
+    pair_keys = [f"{state}_to_{to_state}" for state in states for to_state in _destination_stages(state)]
+    all_group_keys = list(states) + pair_keys
     n_subjects = args.n_subjects if args.n_subjects and args.n_subjects > 0 else None
     workers = max(1, args.workers)
 
@@ -405,7 +422,7 @@ def main() -> None:
             to_process = []
             n_from_cache = 0
             for sid in chunk:
-                cached = _read_cache(cache_dir, sid, states)
+                cached = _read_cache(cache_dir, sid, all_group_keys)
                 if cached is None:
                     to_process.append(sid)
                     continue
@@ -528,6 +545,85 @@ def main() -> None:
     plt.close(corr_fig)
     logger.info(f"saved stage/phase correlation figure to {corr_png_path} and {corr_pdf_path}")
 
+    pair_summary: Dict[str, Optional[int]] = {}
+    for state in states:
+        for to_state in _destination_stages(state):
+            pair_key = f"{state}_to_{to_state}"
+            pair_label = f"{state}->{to_state}"
+            rates_by_sid = {sid: included[sid][0][pair_key] for sid in subject_ids
+                             if pair_key in included[sid][0]}
+            curves_by_sid = {sid: included[sid][1][pair_key] for sid in subject_ids
+                              if pair_key in included[sid][1]}
+            if not rates_by_sid:
+                logger.warning(f"{pair_label}: 0/{len(subject_ids)} subjects have a usable "
+                                f"{args.event} transition-tail phase distribution -- skipping this pair")
+                pair_summary[pair_key] = None
+                continue
+
+            common_ids = sorted(curves_by_sid)
+            if not common_ids:
+                logger.warning(f"{pair_label}: {len(rates_by_sid)} subjects have usable rates but "
+                                f"none have complete {args.n_phase_points}-point phase coverage -- "
+                                "skipping this pair")
+                pair_summary[pair_key] = None
+                continue
+
+            pair_dir = args.output_dir / "by_destination" / pair_key
+            (pair_dir / "group_stats").mkdir(parents=True, exist_ok=True)
+
+            group_stack = np.stack([curves_by_sid[sid] for sid in common_ids])
+            group_mean, group_sem = _mean_sem(group_stack, axis=0)
+
+            rates_stack = np.stack([rates_by_sid[sid] for sid in common_ids])
+            mean_r, sem_r = _mean_sem(rates_stack)
+
+            np.savez(
+                pair_dir / "group_stats" / f"{pair_key}.npz",
+                group_mean=group_mean, group_sem=group_sem, phase_points=phase_points,
+                phase_bin_rates=rates_stack, bin_centers=bin_centers,
+                n_complete=len(common_ids), subject_ids=np.asarray(common_ids),
+            )
+
+            rate_curves = np.stack([
+                pph.resample_bin_rates_to_points(rates_by_sid[sid], bin_centers, phase_points)
+                for sid in common_ids
+            ])
+            r_matrix = stc.per_subject_curve_correlation(rate_curves, group_stack)
+            corr_summary = stc.phase_curve_correlation_summary(r_matrix, stage_order)
+            corr_summary.to_csv(pair_dir / f"stat_summary_{pair_key}.csv", index=False)
+            logger.info(f"{pair_label}: saved stat_summary_{pair_key}.csv\n"
+                        + corr_summary.to_string(index=False))
+
+            pd.DataFrame({"subject_id": common_ids}).to_csv(
+                pair_dir / f"usable_subjects_{pair_key}.csv", index=False
+            )
+
+            fig = build_state_figure(
+                pair_label, channel=args.channel, event_label=event_label, group_mean=group_mean,
+                n_complete=len(common_ids), phase_points=phase_points, bin_centers=bin_centers,
+                mean_r=mean_r, sem_r=sem_r,
+            )
+            pdf_path = pair_dir / f"hypnodensity_isfs_phase_{pair_key}.pdf"
+            png_path = pair_dir / f"hypnodensity_isfs_phase_{pair_key}.png"
+            fig.savefig(pdf_path)
+            fig.savefig(png_path)
+            plt.close(fig)
+            logger.info(f"saved {pair_label} figure to {pdf_path} and {png_path}")
+
+            corr_fig = build_correlation_figure(
+                {pair_label: corr_summary}, channel=args.channel, event_label=event_label,
+                stage_order=stage_order,
+            )
+            corr_png_path = pair_dir / f"{args.event}_stage_phase_corr.png"
+            corr_pdf_path = pair_dir / f"{args.event}_stage_phase_corr.pdf"
+            corr_fig.savefig(corr_png_path, dpi=150, bbox_inches="tight")
+            corr_fig.savefig(corr_pdf_path, bbox_inches="tight")
+            plt.close(corr_fig)
+            logger.info(f"saved {pair_label} stage/phase correlation figure to "
+                        f"{corr_png_path} and {corr_pdf_path}")
+
+            pair_summary[pair_key] = len(common_ids)
+
     summary_lines = [
         "=== Subject inclusion summary ===",
         f"Scanned:  {n_scanned}",
@@ -561,6 +657,17 @@ def main() -> None:
                           "event distribution and the continuous curve):")
     for state in states:
         summary_lines.append(f"  {state}: {state_summary[state]['n_common']}/{len(subject_ids)}")
+
+    summary_lines.append("\nPer-destination-stage breakdown (subjects contributing to each "
+                          "pair's figure, out of the same included-subject pool):")
+    for state in states:
+        for to_state in _destination_stages(state):
+            pair_key = f"{state}_to_{to_state}"
+            n = pair_summary.get(pair_key)
+            if n is None:
+                summary_lines.append(f"  {state}->{to_state}: skipped (0 usable subjects)")
+            else:
+                summary_lines.append(f"  {state}->{to_state}: {n}/{len(subject_ids)}")
 
     summary_text = "\n".join(summary_lines) + "\n"
     (args.output_dir / "summary.txt").write_text(summary_text)
