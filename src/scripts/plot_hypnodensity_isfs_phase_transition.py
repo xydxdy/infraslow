@@ -53,7 +53,7 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -170,85 +170,75 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 # Per-subject computation (module-level so ProcessPoolExecutor can pickle it)
 # --------------------------------------------------------------------------- #
-def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
-                  states: Sequence[str], band: str, stage_epochs: np.ndarray, epoch_sec: float, *,
-                  window_sec: float, persist_epochs: int,
-                  min_bout_sec: float = DEFAULT_MIN_BOUT_SEC) -> dict:
-    """Same contract as `plot_hypnodensity_isfs_phase.load_subject`, but each
-    state's bouts are first reduced to their pre-transition tails via
-    `infraslow.pipeline.transitions.select_transition_tails` before the phase
-    timeseries is built.
-
-    Raises:
-        FileNotFoundError: missing U-Sleep hypnodensity, or missing temporal_ISFS/bouts
-            artifacts.
-        ValueError: no usable transition-tail bouts.
-    """
-    subject_dir = Path(data_dir) / subject_id
-    t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
-    t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, band)
-
-    phase_parts = []
-    for state in states:
-        bouts = pio.load_stage_bouts(subject_dir, channel, state)["all"]
-        if bouts.shape[0]:
-            durations = bouts[:, 1] - bouts[:, 0]
-            bouts = bouts[durations >= min_bout_sec]
-        bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec,
-                                             persist_epochs=persist_epochs)
-        if bouts.shape[0]:
-            series = pph.build_subject_phase_timeseries(t_env, filtered, bouts)
-            if series["t"].size:
-                continuous = pph.build_subject_continuous_phase_timeseries(t_env, filtered, bouts)
-                series["phase_continuous"] = continuous["phase_angle"]
-                phase_parts.append(pd.DataFrame(series).assign(state=state))
-
-    if not phase_parts:
-        raise ValueError(
-            f"no usable {'/'.join(states)} transition-tail bouts (>= {window_sec}s, "
-            "ending in a real stage transition) for this subject"
-        )
-
-    phase = pd.concat(phase_parts, ignore_index=True).sort_values("t", kind="stable").reset_index(drop=True)
-    return dict(t_hyp=t_hyp, probs=probs, phase=phase)
+def _destination_stages(state: str) -> List[str]:
+    """Every `USLEEP_STAGE_ORDER` stage other than `state` (case-insensitive
+    compare) -- the destination stages `state`'s transitions are broken out
+    by, e.g. N2 -> Wake, N1, N3, REM."""
+    return [s for s in USLEEP_STAGE_ORDER if s.strip().upper() != state.strip().upper()]
 
 
-def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str, state: str,
-                                   stage_epochs: np.ndarray, epoch_sec: float, *,
-                                   event: str, window_sec: float, persist_epochs: int,
-                                   min_bout_sec: float = DEFAULT_MIN_BOUT_SEC):
-    """Same contract as `plot_hypnodensity_isfs_phase.subject_event_phase_bin_rates`,
-    restricted to this state's pre-transition-tail bouts."""
-    spec = _EVENT_SPECS[event]
-    subject_dir = Path(data_dir) / subject_id
-    bouts = spec["load_bouts"](subject_dir, channel, state)[spec["bouts_key"]]
-    if bouts.shape[0]:
-        durations = bouts[:, 1] - bouts[:, 0]
-        bouts = bouts[durations >= min_bout_sec]
-    bouts = ptr.select_transition_tails(bouts, stage_epochs, epoch_sec, state, window_sec,
-                                         persist_epochs=persist_epochs)
+def _rates_for_bouts(
+    t_env: np.ndarray, filtered: np.ndarray, bouts: np.ndarray, event_times: np.ndarray,
+) -> Optional[np.ndarray]:
+    """This bout set's `phase_bin_rates` (8,), or `None` if `bouts` is empty or the
+    resulting event distribution has zero total rate -- same "usable" rule the
+    original `subject_event_phase_bin_rates` caller already applied, factored out
+    so pooled and per-destination-pair bout sets share it."""
     if bouts.shape[0] == 0:
         return None
-
-    t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, spec["band"])
-    event_summary = spec["load_summary"](subject_dir, channel, state)
-    peak_col = spec["peak_col"]
-    event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
-
     bouts_data = pph.build_bout_phase_data(t_env, filtered, bouts, event_times)
-    return pph.compute_subject_phase_features(bouts_data)
+    feats = pph.compute_subject_phase_features(bouts_data)
+    if feats is None:
+        return None
+    rates = np.asarray(feats["phase_bin_rates"])
+    return rates if rates.sum() > 0 else None
+
+
+def _curve_for_bouts(
+    t_env: np.ndarray, filtered: np.ndarray, bouts: np.ndarray, t_hyp: np.ndarray,
+    probs: np.ndarray, n_points: int, label: str,
+) -> Optional[np.ndarray]:
+    """`subject_phase_locked_probs_continuous`'s `(n_points, n_stages)` curve for
+    `bouts` directly, via a throwaway single-state `data["phase"]` frame tagged
+    `label` -- lets pooled and per-destination-pair curves reuse
+    `subject_phase_locked_probs_continuous` (imported unchanged from
+    `plot_hypnodensity_isfs_phase`) instead of re-implementing its bin/mean logic.
+    `None` if `bouts` is empty, produces no in-cycle phase samples, or any output
+    bin is left NaN (incomplete phase coverage)."""
+    if bouts.shape[0] == 0:
+        return None
+    series = pph.build_subject_phase_timeseries(t_env, filtered, bouts)
+    if series["t"].size == 0:
+        return None
+    continuous = pph.build_subject_continuous_phase_timeseries(t_env, filtered, bouts)
+    series["phase_continuous"] = continuous["phase_angle"]
+    phase_df = pd.DataFrame(series).assign(state=label)
+    data = dict(t_hyp=t_hyp, probs=probs, phase=phase_df)
+    curve = subject_phase_locked_probs_continuous(data, state=label, n_points=n_points)
+    return None if np.isnan(curve).any() else curve
 
 
 def _process_subject(
     task: Tuple[str, Path, str, str, str, Tuple[str, ...], str, float, float, float, int],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """Same contract as `plot_hypnodensity_isfs_phase._process_subject`, but
-    loads this subject's scored hypnogram once (`load_subject_hypnogram`) and
-    threads it through both `load_subject` and `subject_event_phase_bin_rates`
-    so the raw Hypnodensity CSV is only read once per subject."""
+    """One subject's full pooled + per-destination-pair pipeline. Loads this
+    subject's scored hypnogram once (`load_subject_hypnogram`) and threads it
+    through every state/pair computation so the raw Hypnodensity CSV is only
+    read once per subject.
+
+    Returns `(subject_id, included, exclusion_reason, rates_by_key,
+    curves_by_key)`. `rates_by_key`/`curves_by_key` are keyed by each pooled
+    state name (e.g. `"N2"`) AND by each destination-pair key
+    `f"{state}_to_{to_state}"` (e.g. `"N2_to_Wake"`), covering every
+    `USLEEP_STAGE_ORDER` destination other than the source state.
+    `curves_by_key[k]` is only ever present when `rates_by_key[k]` is -- the
+    same "only compute the curve for an already-rates-usable key" rule the
+    pooled case has always used.
+    """
     (subject_id, data_dir, usleep_dir, hypno_dir, channel, states, event,
      min_bout_sec, window_sec, persist_sec, n_phase_points) = task
-    band = _EVENT_SPECS[event]["band"]
+    spec = _EVENT_SPECS[event]
+    band = spec["band"]
 
     try:
         stage_epochs, epoch_sec = load_subject_hypnogram(subject_id, hypno_dir=hypno_dir)
@@ -263,35 +253,79 @@ def _process_subject(
     # sites' effective behavior visibly in sync at the point persist_epochs is
     # computed, not hidden inside a second clamp downstream.
     persist_epochs = max(1, int(round(persist_sec / epoch_sec)))
+    subject_dir = Path(data_dir) / subject_id
 
+    # Step A: pooled + per-pair transition-tail bouts, built from each state's
+    # "all" bouts. Deliberately NOT fault-tolerant per state -- a missing/corrupt
+    # artifact for ANY requested state excludes the whole subject, matching the
+    # pre-rework load_subject this replaces (its bout-loading loop had no
+    # per-state try/except either).
     try:
-        data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
-                             stage_epochs, epoch_sec, window_sec=window_sec,
-                             persist_epochs=persist_epochs, min_bout_sec=min_bout_sec)
+        t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
+        t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, band)
+
+        tail_all_by_key: Dict[str, np.ndarray] = {}
+        any_bouts = False
+        for state in states:
+            raw_all = pio.load_stage_bouts(subject_dir, channel, state)["all"]
+            if raw_all.shape[0]:
+                durations = raw_all[:, 1] - raw_all[:, 0]
+                raw_all = raw_all[durations >= min_bout_sec]
+
+            for to_state in [None] + _destination_stages(state):
+                tail = ptr.select_transition_tails(
+                    raw_all, stage_epochs, epoch_sec, state, window_sec,
+                    persist_epochs=persist_epochs, to_state=to_state,
+                )
+                key = state if to_state is None else f"{state}_to_{to_state}"
+                tail_all_by_key[key] = tail
+                if tail.shape[0]:
+                    any_bouts = True
+
+        if not any_bouts:
+            raise ValueError(
+                f"no usable {'/'.join(states)} transition-tail bouts (>= {window_sec}s, "
+                "ending in a real stage transition) for this subject"
+            )
     except Exception as exc:  # noqa: BLE001 - see plot_hypnodensity_isfs_phase._process_subject
         return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}
 
+    # Step B: pooled + per-pair event phase-bin rates, one state at a time and
+    # fault-tolerant per state (a missing event-specific artifact for one state
+    # skips just that state's keys, not the whole subject) -- matches the
+    # pre-rework subject_event_phase_bin_rates call's per-state fault tolerance.
     rates: Dict[str, np.ndarray] = {}
     curves: Dict[str, np.ndarray] = {}
     for state in states:
         try:
-            feats = subject_event_phase_bin_rates(
-                data_dir, subject_id, channel, state, stage_epochs, epoch_sec,
-                event=event, window_sec=window_sec, persist_epochs=persist_epochs,
-                min_bout_sec=min_bout_sec,
-            )
-        except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
-            feats = None
-        if feats is None or sum(feats["phase_bin_rates"]) <= 0:
+            raw_event = spec["load_bouts"](subject_dir, channel, state)[spec["bouts_key"]]
+            if raw_event.shape[0]:
+                durations = raw_event[:, 1] - raw_event[:, 0]
+                raw_event = raw_event[durations >= min_bout_sec]
+            event_summary = spec["load_summary"](subject_dir, channel, state)
+            peak_col = spec["peak_col"]
+            event_times = (event_summary[peak_col].to_numpy()
+                           if peak_col in event_summary.columns else np.empty(0))
+        except Exception:  # noqa: BLE001 - same as above, scoped to this state only
             continue
-        rates[state] = np.asarray(feats["phase_bin_rates"])
 
-        try:
-            curve = subject_phase_locked_probs_continuous(data, state=state, n_points=n_phase_points)
-        except Exception:  # noqa: BLE001 - ditto
-            continue
-        if not np.isnan(curve).any():
-            curves[state] = curve
+        for to_state in [None] + _destination_stages(state):
+            key = state if to_state is None else f"{state}_to_{to_state}"
+            tail_event = ptr.select_transition_tails(
+                raw_event, stage_epochs, epoch_sec, state, window_sec,
+                persist_epochs=persist_epochs, to_state=to_state,
+            )
+            r = _rates_for_bouts(t_env, filtered, tail_event, event_times)
+            if r is None:
+                continue
+            rates[key] = r
+
+            curve = _curve_for_bouts(
+                t_env, filtered, tail_all_by_key.get(key, np.empty((0, 2))),
+                t_hyp, probs, n_phase_points, key,
+            )
+            if curve is not None:
+                curves[key] = curve
 
     return subject_id, True, None, rates, curves
 
