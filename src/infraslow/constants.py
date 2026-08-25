@@ -1,7 +1,7 @@
 """Every constant used across the :mod:`infraslow` package, in one place.
 
 Grouped by the concern each constant serves (paths, I/O, per-stage signal
-processing, stats, viz) rather than by which module originally defined it.
+processing, viz) rather than by which module originally defined it.
 Each owning submodule re-exports its constants from here (``from ..constants
 import X``) so existing call sites (``infraslow.config.DEFAULT_METADATA``,
 ``infraslow.processing.infraslow.DEFAULT_SIGMA_BAND``, ...) keep working
@@ -30,6 +30,11 @@ DEFAULT_METADATA2 = str(METADATA_DIR / "bioserenity_metadata3.csv")
 DEFAULT_DRUG_METADATA = str(METADATA_DIR / "drug_usage_metadata.csv")
 DEFAULT_EDF_DIR = "$OAK/psg/Bioserenity/edf"
 DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
+#: 1-second U-Sleep hypnodensities: one ``{channel_file}.npy`` per subject/channel,
+#: shape ``(n_seconds, 5)``, columns in ``USLEEP_STAGE_ORDER`` order. A different data
+#: source from ``DEFAULT_HYPNO_DIR``'s 30-s Bioserenity Hypnodensity CSVs (see
+#: ``infraslow.io.usleep_hypnodensity``).
+DEFAULT_USLEEP_HYPNODENSITY_DIR = "$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities"
 DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
 
 
@@ -39,6 +44,28 @@ DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
 DEFAULT_TIMESTAMP_COLUMN = "Timestamp"
 DEFAULT_STAGING_DIRNAME = "Sleep_Staging"
 DEFAULT_HYPNODENSITY_SUFFIX = "_Hypnodensity.csv"
+
+
+# --------------------------------------------------------------------------- #
+# I/O -- 1-s U-Sleep hypnodensity (see infraslow.io.usleep_hypnodensity).
+# --------------------------------------------------------------------------- #
+#: Column order of the 5 stage-probability columns in each U-Sleep hypnodensity
+#: ``.npy`` file -- matches the stage order ``infraslow.io.hypnodensity`` already uses
+#: for the (30-s epoch) Bioserenity hypnodensity CSVs. Not independently verifiable from
+#: the ``.npy`` files themselves (no header); documented, not asserted, as an assumption.
+USLEEP_STAGE_ORDER: Tuple[str, ...] = ("Wake", "N1", "N2", "N3", "REM")
+
+#: Seconds per row of the raw U-Sleep hypnodensity files (1-second resolution).
+DEFAULT_USLEEP_EPOCH_SEC = 1.0
+
+#: Default window (s) averaged when reducing 1-s U-Sleep hypnodensity to a coarser
+#: hypnogram (see ``hypnodensity_to_epoch_hypnogram``).
+DEFAULT_HYPNOGRAM_EPOCH_SEC = 3.0
+
+#: Max allowed |duration mismatch| (s) between a subject's U-Sleep hypnodensity length
+#: and its ``temporal_ISFS`` envelope length before the two are treated as misaligned
+#: recordings.
+DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC = 120.0
 
 
 # --------------------------------------------------------------------------- #
@@ -198,27 +225,12 @@ DEFAULT_ISFS_PERIOD: Tuple[float, float] = (25.0, 100.0)
 #: participant's phase-bin distribution (``isfs_event_phase_distribution``);
 #: below this the denominator is too small to be meaningful.
 DEFAULT_ISFS_MIN_EVENTS: int = 5
-
-
-# --------------------------------------------------------------------------- #
-# Stats -- spindle-rate group assignment (see infraslow.stats.group_assignment).
-# --------------------------------------------------------------------------- #
-LOW_LABEL = "low_spindle_rate"
-HIGH_LABEL = "high_spindle_rate"
-MID_LABEL = "mid_spindle_rate"
-MIN_SUBJECTS_FOR_CUTOFF = 2
-
-
-# --------------------------------------------------------------------------- #
-# Stats -- group comparison (see infraslow.stats.group_comparison).
-# --------------------------------------------------------------------------- #
-#: |skewness| at/above this is "strongly skewed" -> prefer Mann-Whitney U.
-SKEW_THRESHOLD = 1.0
-#: a value farther than this many IQRs from the nearest quartile is an "extreme outlier".
-OUTLIER_IQR_MULTIPLIER = 3.0
-#: below this many finite values per group, skewness/outlier diagnostics are unreliable
-#: -> fall back to the distribution-free Mann-Whitney U rather than trusting them.
-MIN_N_FOR_DISTRIBUTION_CHECKS = 8
+#: Mirrors ``src/scripts/preprocessing.py``'s ``MIN_BOUT_SEC`` -- the minimum
+#: consecutive-stage bout length (s) preprocessing.py requires before it will
+#: ever write a bout to ``bouts.npz``. ``pipeline.py`` re-applies this as a
+#: defensive filter rather than blindly trusting that every upstream artifact
+#: satisfies the invariant.
+DEFAULT_MIN_BOUT_SEC: float = 200.0
 
 
 # --------------------------------------------------------------------------- #
@@ -228,30 +240,17 @@ SEABORN_CONTEXT = "talk"
 SEABORN_STYLE = "whitegrid"
 SEABORN_PALETTE = "deep"
 
-LOW_COLOR = "#1f77b4"
-HIGH_COLOR = "#d62728"
-MID_COLOR = "#7f7f7f"
-#: Whole-cohort ("before" any low/high split) curve/violin color.
-ALL_COLOR = "#2ca02c"
-#: Individual-subject line color -- matches infraslow_yasa_compare.py's SUBJ_COLOR.
-SUBJECT_COLOR = "0.6"
-
-TITLE_FONTSIZE = 12
-LABEL_FONTSIZE = 10
-TICK_FONTSIZE = 9
-LEGEND_FONTSIZE = 8
-ANNOTATION_FONTSIZE = 8
-SUPTITLE_FONTSIZE = 15
-
 
 __all__ = [
     # Paths
     "METADATA_DIR", "REPO_ROOT", "DEFAULT_METADATA", "DEFAULT_METADATA2",
     "DEFAULT_DRUG_METADATA", "DEFAULT_EDF_DIR", "DEFAULT_HYPNO_DIR",
-    "DEFAULT_DRUG_EXCLUDE_LIST",
+    "DEFAULT_USLEEP_HYPNODENSITY_DIR", "DEFAULT_DRUG_EXCLUDE_LIST",
     # I/O
     "DEFAULT_TIMESTAMP_COLUMN", "DEFAULT_STAGING_DIRNAME",
-    "DEFAULT_HYPNODENSITY_SUFFIX", "N_IO_WORKERS", "BIOSERENITY_ALIAS_MAP",
+    "DEFAULT_HYPNODENSITY_SUFFIX", "USLEEP_STAGE_ORDER", "DEFAULT_USLEEP_EPOCH_SEC",
+    "DEFAULT_HYPNOGRAM_EPOCH_SEC", "DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC",
+    "N_IO_WORKERS", "BIOSERENITY_ALIAS_MAP",
     # Processing
     "DEFAULT_TARGET_SFREQ", "NREM_STAGES", "DEFAULT_EPOCH_SEC",
     "DEFAULT_STAGE_MAP", "DEFAULT_EEG_CHANNELS", "DEFAULT_FREQ_SW",
@@ -260,13 +259,7 @@ __all__ = [
     "DEFAULT_DELTA_BAND", "DEFAULT_INFRASLOW_BAND", "DEFAULT_SF_ENV",
     "DEFAULT_WINDOW_SEC", "DEFAULT_BASELINE_BAND", "DEFAULT_ISFS_LOWPASS_HZ",
     "DEFAULT_ISFS_FILTER_ORDER", "DEFAULT_ISFS_TUKEY_ALPHA",
-    "DEFAULT_ISFS_PERIOD", "DEFAULT_ISFS_MIN_EVENTS",
-    # Stats
-    "LOW_LABEL", "HIGH_LABEL", "MID_LABEL", "MIN_SUBJECTS_FOR_CUTOFF",
-    "SKEW_THRESHOLD", "OUTLIER_IQR_MULTIPLIER", "MIN_N_FOR_DISTRIBUTION_CHECKS",
+    "DEFAULT_ISFS_PERIOD", "DEFAULT_ISFS_MIN_EVENTS", "DEFAULT_MIN_BOUT_SEC",
     # Viz
     "SEABORN_CONTEXT", "SEABORN_STYLE", "SEABORN_PALETTE",
-    "LOW_COLOR", "HIGH_COLOR", "MID_COLOR", "ALL_COLOR", "SUBJECT_COLOR",
-    "TITLE_FONTSIZE", "LABEL_FONTSIZE", "TICK_FONTSIZE", "LEGEND_FONTSIZE",
-    "ANNOTATION_FONTSIZE", "SUPTITLE_FONTSIZE",
 ]

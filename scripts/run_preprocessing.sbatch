@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=16G
+#SBATCH --mem=32G
 
 # Runs src/scripts/preprocessing.py over the whole valid Bioserenity cohort (every
 # subject with both an EDF and a Hypnodensity CSV), channel C3 only, saving per-subject
@@ -31,17 +31,18 @@
 #   seff <jobid>          # once it finishes (or squeue --me while running)
 # and adjust --mem/--time above before submitting the full 1000-way array. ***
 #
-# Each shard writes its own progress_shard{N}.log under $OUTPUT_ROOT (see
-# preprocessing.py's main()) -- shards never share a log file.
+# Each shard writes its own progress_shard{N}.log under $OUTPUT_ROOT/logs (see
+# preprocessing.py's main()) -- shards never share a log file. Per-subject
+# output trees go under $OUTPUT_ROOT/data.
 #
 # Override at submit time, e.g.:
-#   sbatch --array=0-999 --export=ALL,CHANNELS=C3,OUTPUT_ROOT=/scratch/users/chaisaen/data_v3 \
+#   sbatch --array=0-999 --export=ALL,CHANNELS=C3,OUTPUT_ROOT=/scratch/users/chaisaen/processed_data \
 #       run_preprocessing.sbatch
 #   sbatch --array=0-9 --export=ALL,LIMIT=2 run_preprocessing.sbatch   # quick test: 2 subjects/shard
 
 set -euo pipefail
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/users/chaisaen/data_v3}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/users/chaisaen/processed_data}"
 CHANNELS="${CHANNELS:-C3}"
 LIMIT="${LIMIT:-}"
 

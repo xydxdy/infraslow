@@ -1,0 +1,1 @@
+srun -p normal -c 8 --mem=32G --time=08:00:00 --pty bash

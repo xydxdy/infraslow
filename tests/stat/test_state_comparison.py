@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy import stats as scipy_stats
+from statsmodels.stats.multitest import multipletests
+
+from infraslow.stat import state_comparison as stc
+
+
+def test_mean_sem_known_values():
+    x = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    mean, sem = stc.mean_sem(x)
+    assert np.allclose(mean, [3.0, 4.0])
+    assert np.allclose(sem, x.std(axis=0, ddof=1) / np.sqrt(3))
+
+
+def test_describe_reports_mean_sd_median_iqr():
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    d = stc.describe(x)
+    assert d["mean"] == pytest.approx(3.0)
+    assert d["median"] == pytest.approx(3.0)
+    assert d["sd"] == pytest.approx(x.std(ddof=1))
+    assert d["iqr"] == pytest.approx(np.percentile(x, 75) - np.percentile(x, 25))
+
+
+def test_describe_ignores_nan():
+    x = np.array([1.0, np.nan, 3.0, 5.0])
+    d = stc.describe(x)
+    assert d["mean"] == pytest.approx(3.0)
+
+
+def test_paired_ttest_known_values_match_scipy():
+    x = np.array([10.0, 12.0, 9.0, 15.0, 11.0])
+    y = np.array([8.0, 10.0, 9.5, 13.0, 9.0])
+    result = stc.paired_ttest(x, y)
+    t_expected, p_expected = scipy_stats.ttest_rel(x, y)
+    assert result["n_pairs"] == 5
+    assert result["x_mean"] == pytest.approx(11.4)
+    assert result["y_mean"] == pytest.approx(9.9)
+    assert result["mean_diff"] == pytest.approx(1.5)
+    assert result["t_stat"] == pytest.approx(t_expected)
+    assert result["p_value"] == pytest.approx(p_expected)
+
+
+def test_paired_ttest_drops_nan_pairs_and_reports_n_pairs():
+    x = np.array([1.0, np.nan, 3.0, 4.0])
+    y = np.array([1.5, 2.0, np.nan, 3.5])
+    result = stc.paired_ttest(x, y)
+    assert result["n_pairs"] == 2  # only indices 0 and 3 are valid in both
+
+
+def test_paired_ttest_rejects_mismatched_shapes():
+    with pytest.raises(ValueError):
+        stc.paired_ttest(np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0]))
+
+
+def test_paired_ttest_fewer_than_two_pairs_returns_nan_stats():
+    result = stc.paired_ttest(np.array([1.0]), np.array([2.0]))
+    assert result["n_pairs"] == 1
+    assert np.isnan(result["t_stat"])
+    assert np.isnan(result["p_value"])
+
+
+def test_paired_ttest_zero_variance_diff_returns_nan_stats():
+    x = np.array([1.0, 2.0, 3.0])
+    y = np.array([0.0, 1.0, 2.0])  # constant difference (1.0) -> zero variance
+    result = stc.paired_ttest(x, y)
+    assert result["n_pairs"] == 3
+    assert np.isnan(result["t_stat"])
+    assert np.isnan(result["p_value"])
+
+
+def test_paired_effect_size_matches_manual_cohens_dz():
+    x = np.array([10.0, 12.0, 9.0, 15.0, 11.0])
+    y = np.array([8.0, 10.0, 9.5, 13.0, 9.0])
+    diff = x - y
+    expected = diff.mean() / diff.std(ddof=1)
+    assert stc.paired_effect_size(x, y) == pytest.approx(expected)
+
+
+def test_paired_effect_size_nan_when_zero_variance():
+    x = np.array([1.0, 2.0, 3.0])
+    y = np.array([0.0, 1.0, 2.0])  # constant difference (1.0) -> zero variance
+    assert np.isnan(stc.paired_effect_size(x, y))
+
+
+def test_fdr_correct_matches_statsmodels():
+    p = [0.001, 0.01, 0.03, 0.04, 0.5]
+    q = stc.fdr_correct(p)
+    _, q_expected, _, _ = multipletests(p, method="fdr_bh")
+    assert np.allclose(q, q_expected)
+
+
+def test_fdr_correct_preserves_nan_positions():
+    p = [0.01, np.nan, 0.2]
+    q = stc.fdr_correct(p)
+    assert np.isnan(q[1])
+    assert not np.isnan(q[0])
+    assert not np.isnan(q[2])
+
+
+def test_compare_phase_bins_shape_and_columns():
+    rng = np.random.default_rng(0)
+    n2_rates = rng.normal(12.5, 2.0, size=(6, 8))
+    n3_rates = rng.normal(12.5, 2.0, size=(6, 8))
+    bin_centers = np.linspace(-np.pi, np.pi, 8, endpoint=False)
+    result = stc.compare_phase_bins(n2_rates, n3_rates, bin_centers)
+    assert len(result) == 8
+    assert list(result["phase_bin"]) == list(range(1, 9))
+    assert {"phase_center", "N2_mean", "N3_mean", "mean_difference", "n_pairs", "t_stat",
+            "p_value", "q_value", "significant_FDR"}.issubset(result.columns)
+    n_subjects = n2_rates.shape[0]
+    assert (result["n_pairs"] == n_subjects).all()
+
+
+def test_compare_phase_bins_rejects_mismatched_shapes():
+    with pytest.raises(ValueError):
+        stc.compare_phase_bins(np.zeros((5, 8)), np.zeros((5, 7)), np.zeros(8))
+
+
+def test_compare_phase_bins_rejects_wrong_bin_centers_length():
+    with pytest.raises(ValueError):
+        stc.compare_phase_bins(np.zeros((5, 8)), np.zeros((5, 8)), np.zeros(7))
+
+
+def test_compare_isfs_metrics_reports_expected_rows_and_dz():
+    n2_df = pd.DataFrame({"peak_freq_hz": [0.02, 0.021, 0.019], "auc": [1.0, 1.1, 0.9]})
+    n3_df = pd.DataFrame({"peak_freq_hz": [0.018, 0.02, 0.017], "auc": [0.8, 0.9, 0.7]})
+    metrics = {"peak_freq_hz": "peak_frequency_hz", "auc": "auc"}
+    result = stc.compare_isfs_metrics(n2_df, n3_df, metrics)
+    assert list(result["Metric"]) == ["peak_frequency_hz", "auc"]
+    assert "Cohen's dz" in result.columns
+    assert "q" in result.columns
+    assert (result["n_pairs"] == 3).all()
+
+
+def test_compare_isfs_metrics_skips_missing_columns():
+    n2_df = pd.DataFrame({"auc": [1.0, 1.1]})
+    n3_df = pd.DataFrame({"auc": [0.8, 0.9]})
+    metrics = {"auc": "auc", "not_a_column": "missing"}
+    result = stc.compare_isfs_metrics(n2_df, n3_df, metrics)
+    assert list(result["Metric"]) == ["auc"]
+
+
+def test_compare_isfs_metrics_all_missing_returns_empty_with_expected_schema():
+    n2_df = pd.DataFrame({"auc": [1.0, 1.1]})
+    n3_df = pd.DataFrame({"auc": [0.8, 0.9]})
+    metrics = {"not_a_column": "missing"}
+    result = stc.compare_isfs_metrics(n2_df, n3_df, metrics)
+    assert len(result) == 0
+    assert list(result.columns) == [
+        "Metric", "N2 Mean", "N2 SD", "N3 Mean", "N3 SD", "Mean Difference",
+        "t", "p", "n_pairs", "Cohen's dz", "q",
+    ]
+
+
+def test_circular_mean_and_resultant_uniform_gives_near_zero_resultant():
+    angles = np.linspace(-np.pi, np.pi, 8, endpoint=False)
+    _mean_angle, resultant = stc.circular_mean_and_resultant(angles)
+    assert resultant == pytest.approx(0.0, abs=1e-9)
+
+
+def test_circular_mean_and_resultant_concentrated_angles():
+    angles = np.array([0.1, 0.0, -0.1, 0.05])
+    mean_angle, resultant = stc.circular_mean_and_resultant(angles)
+    assert mean_angle == pytest.approx(0.0125, abs=1e-3)
+    assert resultant > 0.99
+
+
+def test_circular_mean_and_resultant_ignores_nan():
+    angles = np.array([0.0, np.nan, 0.0])
+    mean_angle, _resultant = stc.circular_mean_and_resultant(angles)
+    assert mean_angle == pytest.approx(0.0)
+
+
+def test_circular_mean_and_resultant_all_nan_returns_nan():
+    mean_angle, resultant = stc.circular_mean_and_resultant(np.array([np.nan, np.nan]))
+    assert np.isnan(mean_angle)
+    assert np.isnan(resultant)
+
+
+def test_per_subject_curve_correlation_perfect_positive_and_negative():
+    x = np.linspace(0.0, 1.0, 10)
+    rate_curves = np.tile(x, (2, 1))
+    stage_curves = np.stack([np.stack([x, 1 - x], axis=1)] * 2)
+    r = stc.per_subject_curve_correlation(rate_curves, stage_curves)
+    assert r.shape == (2, 2)
+    assert np.allclose(r[:, 0], 1.0)
+    assert np.allclose(r[:, 1], -1.0)
+
+
+def test_per_subject_curve_correlation_nan_on_constant_curve():
+    rate_curves = np.zeros((1, 5))  # zero variance
+    stage_curves = np.random.default_rng(0).normal(size=(1, 5, 2))
+    r = stc.per_subject_curve_correlation(rate_curves, stage_curves)
+    assert np.all(np.isnan(r))
+
+
+def test_per_subject_curve_correlation_rejects_mismatched_shapes():
+    with pytest.raises(ValueError):
+        stc.per_subject_curve_correlation(np.zeros((3, 5)), np.zeros((3, 6, 2)))
+
+
+def test_phase_curve_correlation_summary_known_values_match_scipy():
+    r = np.array([0.5, 0.6, 0.4, 0.55, 0.45])
+    result = stc.phase_curve_correlation_summary(r.reshape(-1, 1), ["stageA"])
+    z = np.arctanh(r)
+    t_expected, p_expected = scipy_stats.ttest_1samp(z, 0.0)
+    assert result.loc[0, "n"] == 5
+    assert result.loc[0, "mean_r"] == pytest.approx(r.mean())
+    assert result.loc[0, "t_stat"] == pytest.approx(t_expected)
+    assert result.loc[0, "p_value"] == pytest.approx(p_expected)
+
+
+def test_phase_curve_correlation_summary_fewer_than_three_returns_nan_stats():
+    r_matrix = np.array([[0.5], [np.nan]])
+    result = stc.phase_curve_correlation_summary(r_matrix, ["stageA"])
+    assert result.loc[0, "n"] == 1
+    assert np.isnan(result.loc[0, "t_stat"])
+    assert np.isnan(result.loc[0, "q_value"])
+    assert not result.loc[0, "significant_FDR"]
+
+
+def test_phase_curve_correlation_summary_rejects_column_mismatch():
+    with pytest.raises(ValueError):
+        stc.phase_curve_correlation_summary(np.zeros((5, 2)), ["only_one"])
