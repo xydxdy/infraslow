@@ -99,6 +99,7 @@ from infraslow.io import usleep_hypnodensity as uh
 from infraslow.stat import state_comparison as stc
 from infraslow.constants import (
     DEFAULT_MIN_BOUT_SEC,
+    DEFAULT_USLEEP_EPOCH_SEC,
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
     USLEEP_STAGE_ORDER,
 )
@@ -157,6 +158,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-bout-sec", type=float,
                     default=float(_env_str("MIN_BOUT_SEC", str(DEFAULT_MIN_BOUT_SEC))),
                     help="Minimum consecutive-stage bout length (s) (env: MIN_BOUT_SEC)")
+    p.add_argument("--usleep-epoch-sec", type=float,
+                    default=float(_env_str("USLEEP_EPOCH_SEC", str(DEFAULT_USLEEP_EPOCH_SEC))),
+                    help="Average the native 1-s U-Sleep hypnodensity into windows this "
+                         "many seconds wide before matching it to phase samples; must be "
+                         "a positive integer multiple of 1s (default: no averaging) "
+                         "(env: USLEEP_EPOCH_SEC)")
     p.add_argument("--n-phase-points", type=int, default=50,
                     help="Resolution of the continuous phase-locked group curve")
     p.add_argument("--n-subjects", type=int, default=100,
@@ -182,23 +189,33 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
                   states: Sequence[str], band: str, *,
-                  min_bout_sec: float = DEFAULT_MIN_BOUT_SEC) -> dict:
+                  min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
+                  usleep_epoch_sec: float = DEFAULT_USLEEP_EPOCH_SEC) -> dict:
     """Load and align one subject's U-Sleep hypnodensity with its infraslow phase time
     series, or raise with a short, categorized reason.
 
-    Returns a dict with keys `t_hyp`, `probs` (1-s hypnodensity), `phase` (this
-    subject's whole-recording phase series, pooled across every state in `states` --
-    N2 and N3 bouts are time-disjoint by construction, so concatenating and re-sorting
-    is safe; carries both the discrete 1-8 `phase_bin`/`phase_angle` and the
-    continuous `phase_continuous`).
+    `usleep_epoch_sec` averages the native 1-s hypnodensity into coarser
+    `usleep_epoch_sec`-wide windows (via `uh.hypnodensity_to_epoch_hypnogram`) before
+    it's matched to phase samples -- a no-op at the default 1.0 (each "window" is a
+    single native row).
+
+    Returns a dict with keys `t_hyp`, `probs` (hypnodensity, `usleep_epoch_sec`-wide
+    rows), `phase` (this subject's whole-recording phase series, pooled across every
+    state in `states` -- N2 and N3 bouts are time-disjoint by construction, so
+    concatenating and re-sorting is safe; carries both the discrete 1-8
+    `phase_bin`/`phase_angle` and the continuous `phase_continuous`).
 
     Raises:
         FileNotFoundError: missing U-Sleep hypnodensity, or missing temporal_ISFS/bouts
             artifacts.
-        ValueError: no usable bouts.
+        ValueError: no usable bouts, or `usleep_epoch_sec` is not a positive integer
+            multiple of the native 1-s U-Sleep cadence.
     """
     subject_dir = Path(data_dir) / subject_id
     t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
+    t_hyp, probs, _ = uh.hypnodensity_to_epoch_hypnogram(
+        t_hyp, probs, epoch_sec=usleep_epoch_sec, src_epoch_sec=DEFAULT_USLEEP_EPOCH_SEC,
+    )
     t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, band)
 
     phase_parts = []
@@ -266,7 +283,7 @@ def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: i
 
 
 def _process_subject(
-    task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int],
+    task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int, float],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """One subject's full Section 3/4.1/4.2 pipeline. Returns
     ``(subject_id, included, exclusion_reason, rates_by_state, curves_by_state)`` --
@@ -274,12 +291,13 @@ def _process_subject(
     state was usable for it (``curves_by_state`` is always a subset of
     ``rates_by_state``, same as the notebook's Section 4.2 restricting itself to
     Section 4.1's usable subject set)."""
-    subject_id, data_dir, usleep_dir, channel, states, event, min_bout_sec, n_phase_points = task
+    (subject_id, data_dir, usleep_dir, channel, states, event, min_bout_sec, n_phase_points,
+     usleep_epoch_sec) = task
     band = _EVENT_SPECS[event]["band"]
 
     try:
         data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
-                             min_bout_sec=min_bout_sec)
+                             min_bout_sec=min_bout_sec, usleep_epoch_sec=usleep_epoch_sec)
     except Exception as exc:  # noqa: BLE001 - a missing, empty, or corrupt artifact
         # (e.g. a 0-byte npz from a killed prior job raises EOFError, not caught by
         # the FileNotFoundError/ValueError/OSError this used to only catch) excludes
@@ -547,7 +565,8 @@ def main() -> None:
         candidates = candidates[: args.limit]
     logger.info(f"{len(candidates)} candidate subject(s) under {args.data_dir}; "
                 f"channel={args.channel} states={states} event={args.event!r} "
-                f"n_subjects={n_subjects or 'unlimited'} workers={workers}")
+                f"n_subjects={n_subjects or 'unlimited'} workers={workers} "
+                f"usleep_epoch_sec={args.usleep_epoch_sec}")
 
     included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]] = {}
     exclusion_reasons: Dict[str, str] = {}
@@ -581,7 +600,7 @@ def main() -> None:
             if to_process:
                 tasks = [
                     (sid, args.data_dir, args.usleep_dir, args.channel, states, args.event,
-                     args.min_bout_sec, args.n_phase_points)
+                     args.min_bout_sec, args.n_phase_points, args.usleep_epoch_sec)
                     for sid in to_process
                 ]
                 for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):

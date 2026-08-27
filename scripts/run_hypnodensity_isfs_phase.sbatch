@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=hypnodensity_isfs_phase
-#SBATCH --partition=normal
+#SBATCH --partition=mignot
 #SBATCH --output=/scratch/users/chaisaen/logs/hypnodensity_isfs_phase_%j.out
-#SBATCH --time=48:00:00
+#SBATCH --time=05:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32GB
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=20GB
 
 # Runs src/scripts/plot_hypnodensity_isfs_phase.py: subject-balanced average U-Sleep
 # stage probability across continuous ISFS phase, per state (N2, N3), plus each
@@ -28,6 +28,14 @@
 #   sbatch --job-name=hypnodensity_isfs_phase_spindle --export=ALL,EVENT=spindle run_hypnodensity_isfs_phase.sbatch
 #   sbatch --job-name=hypnodensity_isfs_phase_sw      --export=ALL,EVENT=sw      run_hypnodensity_isfs_phase.sbatch
 #
+# This script additionally namespaces OUTPUT_DIR by USLEEP_EPOCH_SEC (the
+# python script itself does not), so sweeping the epoch width against the same
+# OUTPUT_DIR never collides either. Sweep 3/5/10 s epochs on 100 subjects as
+# three separate jobs:
+#   sbatch --job-name=hypnodensity_isfs_phase_3s  --export=ALL,USLEEP_EPOCH_SEC=3, run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_5s  --export=ALL,USLEEP_EPOCH_SEC=5, run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_10s --export=ALL,USLEEP_EPOCH_SEC=10, run_hypnodensity_isfs_phase.sbatch
+#
 # Run `python3 plot_hypnodensity_isfs_phase.py --help` for what each flag does.
 
 set -euo pipefail
@@ -39,11 +47,12 @@ DATA_DIR="${DATA_DIR:-$SCRATCH/processed_data/data}"
 USLEEP_DIR="${USLEEP_DIR:-$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities}"
 CHANNEL="${CHANNEL:-C3}"
 STATES="${STATES:-N2 N3}"
-EVENT="${EVENT:-sw}"
-N_PHASE_POINTS="${N_PHASE_POINTS:-50}"
+EVENT="${EVENT:-spindle}"
+N_PHASE_POINTS="${N_PHASE_POINTS:-8}"
 N_SUBJECTS="${N_SUBJECTS:-0}"
+USLEEP_EPOCH_SEC="${USLEEP_EPOCH_SEC:-3}"
 LIMIT="${LIMIT:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/outputs/hypnodensity_isfs_phase}"
+OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/outputs/hypnodensity_isfs_phase_dryrun}/epoch${USLEEP_EPOCH_SEC}s"
 
 # Initialize conda for non-interactive Slurm shell
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -60,6 +69,7 @@ python3 plot_hypnodensity_isfs_phase.py \
     --event "$EVENT" \
     --n-phase-points "$N_PHASE_POINTS" \
     --n-subjects "$N_SUBJECTS" \
+    --usleep-epoch-sec "$USLEEP_EPOCH_SEC" \
     --workers "${SLURM_CPUS_PER_TASK:-1}" \
     --output-dir "$OUTPUT_DIR" \
     ${LIMIT:+--limit "$LIMIT"}
