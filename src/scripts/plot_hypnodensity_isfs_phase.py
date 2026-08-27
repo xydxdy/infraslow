@@ -355,10 +355,45 @@ def _mean_sem(x: np.ndarray, axis: int = 0) -> Tuple[np.ndarray, np.ndarray]:
 # --------------------------------------------------------------------------- #
 # Figure (Section 4.3's figure, one page per state)
 # --------------------------------------------------------------------------- #
+def _wrap_phase(phase: np.ndarray, center: float) -> np.ndarray:
+    """Unwrap circular `phase` (values in `[-pi, pi]`) onto the branch centered on
+    `center`, i.e. every value lands in `[center - pi, center + pi)` -- e.g. with
+    `center=pi/2`, a bin at `-3*pi/4` (physically just before `pi`) is relabeled
+    `5*pi/4` so it sorts after `pi` instead of wrapping back to the start."""
+    return center + ((phase - center + np.pi) % (2 * np.pi) - np.pi)
+
+
+def _phase_tick_label(val: float) -> str:
+    """`val` (expected to be a multiple of `pi/2`) as e.g. `-pi`, `pi/2`, `3*pi/2`."""
+    n = int(round(val / (np.pi / 2)))
+    if n == 0:
+        return "0"
+    sign = "-" if n < 0 else ""
+    n_abs = abs(n)
+    if n_abs % 2 == 0:
+        k = n_abs // 2
+        return f"{sign}{'' if k == 1 else k}pi"
+    return f"{sign}{'' if n_abs == 1 else n_abs}pi/2"
+
+
 def build_state_figure(
     state: str, *, channel: str, event_label: str, group_mean: np.ndarray, n_complete: int,
     phase_points: np.ndarray, bin_centers: np.ndarray, mean_r: np.ndarray, sem_r: np.ndarray,
+    center: float = 0.0,
 ) -> plt.Figure:
+    """`center` re-centers the circular phase axis on an arbitrary angle instead of
+    `0` (e.g. `pi/2` puts both the ascending, phase=0, and descending, phase=+-pi,
+    zero-crossings in view at once instead of splitting the descending one across
+    the two edges of the default phase=0-centered axis)."""
+    order = np.argsort(_wrap_phase(phase_points, center))
+    phase_points = _wrap_phase(phase_points, center)[order]
+    group_mean = group_mean[order]
+
+    order_b = np.argsort(_wrap_phase(bin_centers, center))
+    bin_centers = _wrap_phase(bin_centers, center)[order_b]
+    mean_r = mean_r[order_b]
+    sem_r = sem_r[order_b]
+
     stage_cols = [s.upper() for s in USLEEP_STAGE_ORDER]
     group_labels = [stage_cols[i] for i in np.argmax(group_mean, axis=1)]
     proba_df = pd.DataFrame(group_mean, columns=stage_cols)
@@ -370,17 +405,19 @@ def build_state_figure(
     x_all = hyp_phase.timedelta.total_seconds() / 60
     if hyp_phase.duration > 90:
         x_all = x_all / 60
-    tick_phases = np.array([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
+    tick_phases = center + np.array([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
     tick_idx = np.array([np.argmin(np.abs(phase_points - p)) for p in tick_phases])
     ax_top.set_xticks(x_all[tick_idx])
-    ax_top.set_xticklabels(["-pi", "-pi/2", "0", "pi/2", "pi"])
+    ax_top.set_xticklabels([_phase_tick_label(t) for t in tick_phases])
     ax_top.set_xlabel("ISFS phase (rad)")
     ax_top.set_title(f"A) U-Sleep stage probability across ISFS phase "
                       f"({len(phase_points)} points, n={n_complete} subjects)")
 
     label_bbox = dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.8)
     bar_width = (2 * np.pi / 8) * 0.5
-    bar_colors = [LPURPLE if c < 0 else LORANGE for c in bin_centers]
+    # Color by the sign of the schematic sine (not the raw phase value), so this
+    # stays correct once `center != 0` unwraps some bins past +-pi.
+    bar_colors = [LPURPLE if np.sin(c) < 0 else LORANGE for c in bin_centers]
     ax_bottom.bar(bin_centers, mean_r, width=bar_width, yerr=sem_r, capsize=3,
                   color=bar_colors, edgecolor="0.3", zorder=2)
     for c, pct, err in zip(bin_centers, mean_r, sem_r):
@@ -390,15 +427,15 @@ def build_state_figure(
     y0, y1 = ax_bottom.get_ylim()
     span = y1 - y0
     amp = 0.50 * span
-    x_smooth = np.linspace(-np.pi, np.pi, 200)
+    x_smooth = np.linspace(center - np.pi, center + np.pi, 200)
     y_smooth = amp * np.sin(x_smooth)
     ax_bottom.plot(x_smooth, y_smooth, color="k", lw=2.0, ls="-", zorder=1, label="ISFS phase (schematic)")
     ax_bottom.axhline(0, color="0.5", lw=1.0, zorder=0)
     ax_bottom.set_ylim(min(y0, -amp - 0.03 * span), max(y1, amp + 0.03 * span))
 
-    ax_bottom.set(xlim=(-np.pi, np.pi),
-                  xticks=[-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi],
-                  xticklabels=["-pi", "-pi/2", "0", "pi/2", "pi"],
+    ax_bottom.set(xlim=(center - np.pi, center + np.pi),
+                  xticks=list(tick_phases),
+                  xticklabels=[_phase_tick_label(t) for t in tick_phases],
                   xlabel="ISFS phase (rad)", ylabel=f"% of {event_label} (of total detected)")
     ax_bottom.set_title(f"B) {event_label.capitalize()} distribution across ISFS phase "
                          f"(n={n_complete} subjects)", fontsize=12, fontweight="bold")
@@ -409,12 +446,13 @@ def build_state_figure(
     ax_bottom.set_yticklabels([f"{t:g}" if t >= 0 else "" for t in yticks])
 
     ax_bottom.legend(handles=ax_bottom.get_legend_handles_labels()[0] + [
-        Patch(color=LPURPLE, label="negative half wave (phase < 0)"),
-        Patch(color=LORANGE, label="positive half wave (phase >= 0)")],
+        Patch(color=LPURPLE, label="negative half of ISFS cycle (schematic sine < 0)"),
+        Patch(color=LORANGE, label="positive half of ISFS cycle (schematic sine >= 0)")],
         loc="lower right", frameon=True, framealpha=0.9, fontsize=9)
 
-    fig.suptitle(f"{state} ({channel}): U-Sleep stage probability & {event_label} rate across ISFS phase",
-                 fontweight="bold")
+    center_note = f" (centered on phase={_phase_tick_label(center)})" if center != 0 else ""
+    fig.suptitle(f"{state} ({channel}): U-Sleep stage probability & {event_label} rate across "
+                 f"ISFS phase{center_note}", fontweight="bold")
     fig.tight_layout()
     return fig
 
@@ -705,6 +743,21 @@ def main() -> None:
         fig.savefig(png_path)
         plt.close(fig)
         logger.info(f"saved {state} figure to {pdf_path} and {png_path}")
+
+        # Same data, phase axis re-centered on pi/2 -- puts both the ascending
+        # (phase=0) and descending (phase=+-pi) zero-crossings in view at once,
+        # instead of splitting the descending one across the default figure's edges.
+        fig_c = build_state_figure(
+            state, channel=args.channel, event_label=event_label, group_mean=group_mean,
+            n_complete=len(common_ids), phase_points=phase_points, bin_centers=bin_centers,
+            mean_r=mean_r, sem_r=sem_r, center=np.pi / 2,
+        )
+        pdf_path_c = args.output_dir / f"hypnodensity_isfs_phase_{state}_centered_pi2.pdf"
+        png_path_c = args.output_dir / f"hypnodensity_isfs_phase_{state}_centered_pi2.png"
+        fig_c.savefig(pdf_path_c)
+        fig_c.savefig(png_path_c)
+        plt.close(fig_c)
+        logger.info(f"saved {state} pi/2-centered figure to {pdf_path_c} and {png_path_c}")
 
     corr_fig = build_correlation_figure(
         corr_summaries, channel=args.channel, event_label=event_label, stage_order=stage_order,

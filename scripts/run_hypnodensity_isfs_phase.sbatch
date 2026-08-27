@@ -2,11 +2,11 @@
 #SBATCH --job-name=hypnodensity_isfs_phase
 #SBATCH --partition=mignot
 #SBATCH --output=/scratch/users/chaisaen/logs/hypnodensity_isfs_phase_%j.out
-#SBATCH --time=05:00:00
+#SBATCH --time=1:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=20GB
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=10GB
 
 # Runs src/scripts/plot_hypnodensity_isfs_phase.py: subject-balanced average U-Sleep
 # stage probability across continuous ISFS phase, per state (N2, N3), plus each
