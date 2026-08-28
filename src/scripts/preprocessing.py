@@ -74,7 +74,7 @@ import argparse
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -84,13 +84,13 @@ from infraslow.constants import (
     DEFAULT_EDF_DIR,
     DEFAULT_EEG_CHANNELS,
     DEFAULT_EPOCH_SEC,
-    DEFAULT_HYPNO_DIR,
     DEFAULT_METADATA,
     DEFAULT_METADATA2,
     DEFAULT_SF_ENV,
     DEFAULT_STAGE_MAP,
     DEFAULT_SIGMA_BAND,
     DEFAULT_DELTA_BAND,
+    DEFAULT_USLEEP_HYPNODENSITY_DIR,
     DEFAULT_WINDOW_SEC,
 )
 from infraslow.processing.spindle import _extract_epoch_stages, _stages_to_int, spindles_detect
@@ -98,9 +98,9 @@ from infraslow.processing.sws import sw_detect
 from infraslow.processing.utils import find_stage_bouts
 from infraslow.io.metadata import (
     combine_bioserenity_metadata,
-    find_valid_bioserenity_subjects,
     load_bioserenity_metadata,
 )
+from infraslow.io.utils import list_dir_filenames
 from infraslow.processing.infraslow import eeg_envelope, infraslow_spectrum, isfs_lowpass
 
 logger = logging.getLogger(__name__)
@@ -162,8 +162,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--metadata2", default=DEFAULT_METADATA2,
                     help="Second metadata CSV path, combined with --metadata by ID.")
     p.add_argument("--edf-dir", default=DEFAULT_EDF_DIR, help="Directory of {id}.edf files.")
-    p.add_argument("--hypno-dir", default=DEFAULT_HYPNO_DIR,
-                    help="Directory of {id}_Hypnodensity.csv files.")
+    p.add_argument("--usleep-dir", default=os.path.expandvars(
+                        _env_str("USLEEP_DIR", DEFAULT_USLEEP_HYPNODENSITY_DIR)),
+                    help="U-Sleep hypnodensity directory, one subfolder per subject "
+                         "(env: USLEEP_DIR)")
     p.add_argument("--num-shards", type=int, default=None,
                     help="Split valid subjects into this many disjoint shards, one per "
                          "parallel job (see --shard-index). Defaults to "
@@ -216,21 +218,37 @@ def resolve_shard(cli_num_shards: Optional[int], cli_shard_index: Optional[int])
     return num_shards, shard_index
 
 
-def list_valid_subjects(metadata_path: str, metadata2_path: str, edf_dir: str, hypno_dir: str) -> List[str]:
-    """Every subject id with both an EDF and a Hypnodensity CSV, sorted.
+def _valid_usleep_subject_ids(
+    ids: Sequence[str], edf_names: Set[str], usleep_names: Set[str], *,
+    edf_suffix: str = ".edf",
+) -> List[str]:
+    """Sorted subject ids present in both ``edf_names`` (as ``f"{id}{edf_suffix}"``)
+    and ``usleep_names`` (as a bare directory-entry name, ``id`` itself) -- the
+    pure membership test behind :func:`list_valid_subjects`."""
+    return sorted(
+        sid for sid in ids
+        if f"{sid}{edf_suffix}" in edf_names and sid in usleep_names
+    )
 
-    Reuses :mod:`infraslow.io.metadata`'s cohort-discovery (same two metadata
-    CSVs, same EDF/Hypnodensity directories) so "every subject" here means
-    every subject with usable data.
+
+def list_valid_subjects(metadata_path: str, metadata2_path: str, edf_dir: str, usleep_dir: str) -> List[str]:
+    """Every subject id with both an EDF and a U-Sleep hypnodensity subject
+    folder, sorted.
+
+    Metadata CSVs still supply the master candidate id list (Age/Gender/BMI);
+    unlike the retired Bioserenity-Hypnodensity-CSV check, this no longer reads
+    or requires the Bioserenity Hypnodensity CSV at all -- see
+    ``infraslow.io.usleep_hypnodensity`` for the U-Sleep data this pipeline
+    stages from instead.
     """
     metadata = combine_bioserenity_metadata(
         load_bioserenity_metadata(Path(metadata_path)),
         load_bioserenity_metadata(Path(metadata2_path)),
     )
-    valid = find_valid_bioserenity_subjects(
-        metadata, Path(os.path.expandvars(edf_dir)), Path(os.path.expandvars(hypno_dir)),
-    )
-    return sorted(valid["ID"].astype(str).tolist())
+    edf_names = list_dir_filenames(Path(os.path.expandvars(edf_dir)))
+    usleep_names = list_dir_filenames(Path(os.path.expandvars(usleep_dir)))
+    ids = metadata["ID"].astype(str).tolist()
+    return _valid_usleep_subject_ids(ids, edf_names, usleep_names)
 
 
 # --------------------------------------------------------------------------- #
@@ -471,7 +489,7 @@ def main() -> None:
         subjects = [args.subject]
         logger.info(f"single-subject run: subject={args.subject}")
     else:
-        subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.hypno_dir)
+        subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.usleep_dir)
         subjects = subjects[shard_index::num_shards]
         if args.limit:
             subjects = subjects[: args.limit]
