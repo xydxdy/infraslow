@@ -20,12 +20,21 @@ cohort. Two computations are stage-independent and run **once per channel**
 
 Everything else -- bout-finding, per-bout spindle counts, per-bout
 :func:`~infraslow.processing.infraslow.infraslow_spectrum` -- is genuinely
-per-stage (N2, N3) and is computed by slicing those two whole-night arrays.
+per-stage (N2, N3) and is computed by slicing those two whole-night arrays,
+using each channel's own U-Sleep hypnodensity (not a shared subject-wide
+Bioserenity hypnogram) to find N2/N3 bouts and restrict spindle/slow-wave
+detection -- see the ``usleep/<N>s/`` artifacts above.
 
 Saved layout (one ``<output-dir>/data/<subject>/<channel>/`` tree per
 subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
 
     data/<subject>/<channel>/
+        usleep/
+            <N>s/                  # N = --hypno-epoch-sec, default 3
+                argmax.npy         # (m,) str stage labels, <N>-s epochs
+                                    # (argmax of average.npy's row)
+                average.npy        # (m, 5) averaged U-Sleep stage probabilities,
+                                    # USLEEP_STAGE_ORDER (Wake,N1,N2,N3,REM) columns
         envelope/
             sigma.npz             # t_env, power -- whole night
             delta.npz
@@ -95,7 +104,7 @@ from infraslow.constants import (
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
     DEFAULT_WINDOW_SEC,
 )
-from infraslow.processing.spindle import _extract_epoch_stages, _stages_to_int, spindles_detect
+from infraslow.processing.spindle import _stages_to_int, spindles_detect
 from infraslow.processing.sws import sw_detect
 from infraslow.processing.utils import find_stage_bouts
 from infraslow.io.metadata import (
@@ -159,8 +168,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--subject", default=os.environ.get("SUBJECT"),
                     help="Process only this one subject id / EDF stem (env: SUBJECT). "
                          "If omitted, every valid subject (has both an EDF and a "
-                         "Hypnodensity CSV) is processed -- see --num-shards/--shard-index "
-                         "to split that cohort across parallel jobs.")
+                         "U-Sleep hypnodensity folder) is processed -- see "
+                         "--num-shards/--shard-index to split that cohort across parallel jobs.")
     p.add_argument("--metadata", default=DEFAULT_METADATA, help="Primary metadata CSV path.")
     p.add_argument("--metadata2", default=DEFAULT_METADATA2,
                     help="Second metadata CSV path, combined with --metadata by ID.")
@@ -169,6 +178,11 @@ def parse_args() -> argparse.Namespace:
                         _env_str("USLEEP_DIR", DEFAULT_USLEEP_HYPNODENSITY_DIR)),
                     help="U-Sleep hypnodensity directory, one subfolder per subject "
                          "(env: USLEEP_DIR)")
+    p.add_argument("--hypno-epoch-sec", type=float,
+                    default=float(_env_str("HYPNO_EPOCH_SEC", str(HYPNO_EPOCH_SEC))),
+                    help="Width (s) of the epoch the native 1-s U-Sleep hypnodensity is "
+                         "averaged into before bout-finding/event detection; also names "
+                         "the saved usleep/<N>s/ directory (env: HYPNO_EPOCH_SEC)")
     p.add_argument("--num-shards", type=int, default=None,
                     help="Split valid subjects into this many disjoint shards, one per "
                          "parallel job (see --shard-index). Defaults to "
@@ -376,6 +390,7 @@ def compute_bout_spectra(
 def _detect_stage_events(
     detect_fn, loader: BioserenityPSGLoader, channel: str, codes: Tuple[int, ...],
     all_bouts: Sequence[Tuple[float, float]], *, peak_column: str, empty_columns: Sequence[str],
+    epoch_sec: float = HYPNO_EPOCH_SEC,
 ) -> Tuple[pd.DataFrame, List[Tuple[float, float]]]:
     """Run a YASA event detector (``spindles_detect`` or ``sw_detect``) for one
     stage/channel and pair its events back up with ``all_bouts``.
@@ -394,7 +409,7 @@ def _detect_stage_events(
         summary = pd.DataFrame(columns=list(empty_columns))
         peaks = np.empty(0, dtype=float)
     else:
-        result = detect_fn(loader, ch_names=channel, include=codes)
+        result = detect_fn(loader, ch_names=channel, include=codes, epoch_sec=epoch_sec)
         if result is not None:
             summary = result.summary()
             peaks = summary[peak_column].to_numpy(dtype=float)
@@ -406,21 +421,50 @@ def _detect_stage_events(
 
 
 def preprocess_channel(
-    loader: BioserenityPSGLoader, subject_id: str, channel: str, hypnogram: np.ndarray,
+    loader: BioserenityPSGLoader, subject_id: str, channel: str,
     output_dir: Path, *,
+    usleep_dir: str = DEFAULT_USLEEP_HYPNODENSITY_DIR,
     bands: Mapping[str, Tuple[float, float]] = BANDS,
     stages: Sequence[str] = DEFAULT_STAGES,
     stage_codes: Mapping[str, Tuple[int, ...]] = STAGE_CODES,
-    sf_env: float = SF_ENV, epoch_sec: float = HYPNO_EPOCH_SEC,
+    sf_env: float = SF_ENV, hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
+    align_tolerance_sec: float = DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC,
 ) -> None:
-    """Compute and save every artifact for one subject/channel (see module docstring)."""
+    """Compute and save every artifact for one subject/channel (see module docstring).
+
+    The hypnogram used for bout-finding and to restrict spindle/slow-wave
+    detection is this channel's own U-Sleep hypnodensity, reduced from its
+    native 1-s resolution to ``hypno_epoch_sec``-wide epochs -- not a
+    subject-wide Bioserenity hypnogram (U-Sleep hypnodensity is scored
+    per-channel; see ``infraslow.io.usleep_hypnodensity``'s module docstring).
+    """
     ch_dir = output_dir / DATA_DIRNAME / subject_id / channel
     (ch_dir / "envelope").mkdir(parents=True, exist_ok=True)
     (ch_dir / "temporal_ISFS").mkdir(parents=True, exist_ok=True)
 
     data = np.asarray(loader.get_channel(channel), dtype=float)
     sf = float(loader.sf)
+
+    t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
+    _t_epoch, probs_epoch, stage_epoch = uh.hypnodensity_to_epoch_hypnogram(
+        t_hyp, probs, epoch_sec=hypno_epoch_sec, src_epoch_sec=DEFAULT_USLEEP_EPOCH_SEC,
+    )
+    alignment_warning = _check_usleep_alignment(
+        probs.shape[0] * DEFAULT_USLEEP_EPOCH_SEC, data.shape[-1] / sf,
+        tolerance_sec=align_tolerance_sec,
+    )
+    if alignment_warning:
+        logger.warning("subject %s channel %s: %s", subject_id, channel, alignment_warning)
+    save_usleep_hypnogram(ch_dir, stage_epoch, probs_epoch, hypno_epoch_sec=hypno_epoch_sec)
+
+    hypnogram = _stages_to_int(stage_epoch, DEFAULT_STAGE_MAP)
+    # BioserenityPSGLoader.annotations has no public setter (read-only property
+    # over the ``_annotations`` field); U-Sleep hypnodensity is scored
+    # per-channel, so each channel's own reduced hypnogram must override the
+    # loader's (here always-empty, see preprocess_subject) annotations before
+    # spindle/slow-wave detection runs for this channel.
+    loader._annotations = pd.DataFrame({"stage": stage_epoch})
 
     envelopes = compute_envelopes(data, sf, bands=bands, sf_env=sf_env)
     for name, (t_env, power) in envelopes.items():
@@ -435,7 +479,7 @@ def preprocess_channel(
         (stage_dir / "ISFS").mkdir(parents=True, exist_ok=True)
         codes = stage_codes[stage]
 
-        all_bouts = find_stage_bouts(hypnogram, codes, epoch_sec=epoch_sec, min_dur=min_bout_sec)
+        all_bouts = find_stage_bouts(hypnogram, codes, epoch_sec=hypno_epoch_sec, min_dur=min_bout_sec)
 
         if not all_bouts:
             # No epochs of this stage in the hypnogram -- yasa.spindles_detect/
@@ -449,6 +493,7 @@ def preprocess_channel(
         spindle_summary, spindle_bouts = _detect_stage_events(
             spindles_detect, loader, channel, codes, all_bouts,
             peak_column="Peak", empty_columns=_EMPTY_SPINDLE_COLUMNS,
+            epoch_sec=hypno_epoch_sec,
         )
         spindle_summary.to_csv(stage_dir / "spindel_yasa.csv", index=False)
         _save_bouts(stage_dir / "bouts.npz", all_bouts, spindle_bouts, event_key="spindle")
@@ -456,6 +501,7 @@ def preprocess_channel(
         sw_summary, sw_bouts = _detect_stage_events(
             sw_detect, loader, channel, codes, all_bouts,
             peak_column="NegPeak", empty_columns=_EMPTY_SW_COLUMNS,
+            epoch_sec=hypno_epoch_sec,
         )
         sw_summary.to_csv(stage_dir / "sw_yasa.csv", index=False)
         _save_bouts(stage_dir / "sw_bouts.npz", all_bouts, sw_bouts, event_key="sw")
@@ -473,31 +519,31 @@ def preprocess_channel(
 def preprocess_subject(
     subject_id: str, output_dir: Path, *,
     sf: float = SF, channels: Sequence[str] = DEFAULT_CHANNELS,
+    usleep_dir: str = DEFAULT_USLEEP_HYPNODENSITY_DIR,
     bands: Mapping[str, Tuple[float, float]] = BANDS,
     stages: Sequence[str] = DEFAULT_STAGES,
     stage_codes: Mapping[str, Tuple[int, ...]] = STAGE_CODES,
+    hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
 ) -> None:
     """Load one subject once and preprocess every requested channel.
 
-    The hypnogram comes from ``loader.annotations`` -- by default this is
-    already sourced from the subject's Hypnodensity CSV (see
-    :class:`~infraslow.io.psg_loader.BioserenityPSGLoader`'s default
-    ``annotation_loader``) -- not raw EDF-embedded annotations.
+    No subject-wide hypnogram is loaded here: the Bioserenity Hypnodensity CSV
+    is never read (``annotation_loader`` is a no-op below) -- each channel
+    sources, and saves, its own hypnogram from its own U-Sleep hypnodensity
+    file inside :func:`preprocess_channel`.
     """
     loader = BioserenityPSGLoader(
-        subject_id=subject_id, sf=sf, requested_channels=list(channels)
+        subject_id=subject_id, sf=sf, requested_channels=list(channels),
+        annotation_loader=lambda inst, edf_path: None,
     ).load()
-    hypnogram = _stages_to_int(
-        _extract_epoch_stages(loader.annotations, stage_column="stage"), DEFAULT_STAGE_MAP
-    )
 
     for ch in channels:
         try:
             preprocess_channel(
-                loader, subject_id, ch, hypnogram, output_dir,
-                bands=bands, stages=stages, stage_codes=stage_codes,
-                min_bout_sec=min_bout_sec, window_sec=window_sec,
+                loader, subject_id, ch, output_dir,
+                usleep_dir=usleep_dir, bands=bands, stages=stages, stage_codes=stage_codes,
+                hypno_epoch_sec=hypno_epoch_sec, min_bout_sec=min_bout_sec, window_sec=window_sec,
             )
         except Exception:  # noqa: BLE001 - one bad channel must not sink the others
             logger.exception("Channel %s failed for subject %s", ch, subject_id)
@@ -539,13 +585,14 @@ def main() -> None:
         logger.info(f"shard {shard_index}/{num_shards}: {len(subjects)} subject(s)")
 
     logger.info(f"channels={args.channels} stages={args.stages} sf={args.sf} "
-                f"output_dir={args.output_dir}")
+                f"hypno_epoch_sec={args.hypno_epoch_sec} output_dir={args.output_dir}")
 
     for subject_id in subjects:
         try:
             preprocess_subject(
                 subject_id, args.output_dir, sf=args.sf, channels=args.channels,
-                stages=args.stages, min_bout_sec=args.min_bout_sec, window_sec=args.window_sec,
+                usleep_dir=args.usleep_dir, stages=args.stages, hypno_epoch_sec=args.hypno_epoch_sec,
+                min_bout_sec=args.min_bout_sec, window_sec=args.window_sec,
             )
             logger.info(f"done: subject={subject_id} -> {args.output_dir / DATA_DIRNAME / subject_id}")
         except Exception:  # noqa: BLE001 - one bad subject must not sink the shard
