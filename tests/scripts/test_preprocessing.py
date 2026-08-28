@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scripts import preprocessing as pp
 
@@ -70,3 +71,28 @@ def test_check_usleep_alignment_beyond_tolerance_returns_message_with_diff():
     msg = pp._check_usleep_alignment(1000.0, 1200.0, tolerance_sec=120.0)
     assert msg is not None
     assert "200.0s" in msg
+
+
+def test_check_usleep_file_usable_missing_file_raises(tmp_path: Path):
+    usleep_dir = tmp_path / "usleep"
+    (usleep_dir / "SUBJ001").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="No U-Sleep hypnodensity file"):
+        pp._check_usleep_file_usable("SUBJ001", "C3", str(usleep_dir))
+
+
+def test_check_usleep_file_usable_empty_file_raises(tmp_path: Path):
+    usleep_dir = tmp_path / "usleep"
+    subject_dir = usleep_dir / "SUBJ001"
+    subject_dir.mkdir(parents=True)
+    (subject_dir / "C3.npy").touch()  # 0 bytes -- e.g. a killed write
+    with pytest.raises(FileNotFoundError, match="empty"):
+        pp._check_usleep_file_usable("SUBJ001", "C3", str(usleep_dir))
+
+
+def test_check_usleep_file_usable_nonempty_file_returns_its_path(tmp_path: Path):
+    usleep_dir = tmp_path / "usleep"
+    subject_dir = usleep_dir / "SUBJ001"
+    subject_dir.mkdir(parents=True)
+    np.save(subject_dir / "C3.npy", np.zeros((5, 5)))
+    path = pp._check_usleep_file_usable("SUBJ001", "C3", str(usleep_dir))
+    assert path == subject_dir / "C3.npy"

@@ -365,6 +365,32 @@ def _check_usleep_alignment(
     )
 
 
+def _check_usleep_file_usable(subject_id: str, channel: str, usleep_dir: str) -> Path:
+    """The resolved U-Sleep hypnodensity ``.npy`` path for this subject/channel,
+    checked usable (exists, non-empty) before it's ever opened.
+
+    Runs ahead of :func:`preprocess_channel`'s more expensive work (envelope/ISFS
+    computation, spindle/slow-wave detection) so a truncated or killed write --
+    the common failure mode behind a 0-byte ``.npy`` file -- fails fast with a
+    clear message instead of surfacing as a raw ``numpy``/pickle exception deep
+    inside :func:`~infraslow.io.usleep_hypnodensity.load_usleep_hypnodensity`.
+
+    Raises:
+        FileNotFoundError: no U-Sleep hypnodensity file exists for this channel
+            (see :func:`~infraslow.io.usleep_hypnodensity.resolve_usleep_channel_path`),
+            or the resolved file exists but is empty (0 bytes).
+    """
+    subject_dir = Path(os.path.expandvars(str(usleep_dir))) / subject_id
+    path = uh.resolve_usleep_channel_path(subject_dir, channel)
+    if path is None:
+        raise FileNotFoundError(
+            f"No U-Sleep hypnodensity file for channel '{channel}' under {subject_dir}"
+        )
+    if path.stat().st_size == 0:
+        raise FileNotFoundError(f"U-Sleep hypnodensity file is empty (0 bytes): {path}")
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Per-channel computation
 # --------------------------------------------------------------------------- #
@@ -481,6 +507,7 @@ def preprocess_channel(
     data = np.asarray(loader.get_channel(channel), dtype=float)
     sf = float(loader.sf)
 
+    _check_usleep_file_usable(subject_id, channel, usleep_dir)
     t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
     _t_epoch, probs_epoch, stage_epoch = uh.hypnodensity_to_epoch_hypnogram(
         t_hyp, probs, epoch_sec=hypno_epoch_sec, src_epoch_sec=DEFAULT_USLEEP_EPOCH_SEC,
