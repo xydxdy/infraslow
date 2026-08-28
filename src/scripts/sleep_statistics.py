@@ -4,21 +4,27 @@ subject id).
 
 Subjects are discovered the same way as ``preprocessing.py`` -- via
 :func:`preprocessing.list_valid_subjects` (same two metadata CSVs, same
-EDF/Hypnodensity directories) -- so this script's cohort always matches
-``preprocessing.py``'s, instead of drifting from whatever happens to be
-sitting in an output directory.
+EDF/U-Sleep hypnodensity directories) -- so this script's cohort always
+matches ``preprocessing.py``'s, instead of drifting from whatever happens to
+be sitting in an output directory.
 
 Only the hypnogram is needed to compute sleep statistics, so this reads each
-subject's Hypnodensity CSV directly (:func:`~infraslow.io.hypnodensity.
-hypnodensity_to_annotations`) instead of loading the subject's EDF through
-``BioserenityPSGLoader`` -- far cheaper, since it skips opening 100k+ EEG
-recordings just to read their attached hypnogram.
+subject's ``--channel`` U-Sleep hypnodensity directly
+(:func:`~infraslow.io.usleep_hypnodensity.load_usleep_hypnodensity`, reduced
+to ``--hypno-epoch-sec``-wide epochs the same way ``preprocessing.py`` does)
+instead of loading the subject's EDF through ``BioserenityPSGLoader`` -- far
+cheaper, since it skips opening 100k+ EEG recordings just to read their
+attached hypnogram. U-Sleep hypnodensity is scored per-channel (channels can
+disagree), so this reports one channel's statistics per subject, not a
+subject-wide average across channels -- pick a different ``--channel`` to
+compare.
 
 Saves one CSV to ``--output`` with columns ``[id, <yasa.sleep_statistics()
 keys>]`` (TIB, SPT, WASO, TST, N1, N2, N3, REM, NREM, SOL, Lat_N1, Lat_N2,
 Lat_N3, Lat_REM, %N1, %N2, %N3, %REM, %NREM, SE, SME -- see
 ``yasa.sleep_statistics``'s docstring for definitions). A subject with a
-missing/corrupt Hypnodensity CSV is logged and skipped, not fatal to the run.
+missing/empty/corrupt U-Sleep hypnodensity file for ``--channel`` is logged
+and skipped, not fatal to the run.
 
 Subjects are farmed out across ``--workers`` processes (default:
 ``$SLURM_CPUS_PER_TASK``, else 1) via ``ProcessPoolExecutor`` -- each
@@ -52,17 +58,17 @@ import yasa
 
 from infraslow.constants import (
     DEFAULT_EDF_DIR,
-    DEFAULT_EPOCH_SEC,
-    DEFAULT_HYPNO_DIR,
-    DEFAULT_HYPNODENSITY_SUFFIX,
+    DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_METADATA,
     DEFAULT_METADATA2,
     DEFAULT_STAGE_MAP,
+    DEFAULT_USLEEP_EPOCH_SEC,
+    DEFAULT_USLEEP_HYPNODENSITY_DIR,
 )
-from infraslow.io.hypnodensity import hypnodensity_to_annotations
+from infraslow.io import usleep_hypnodensity as uh
 from infraslow.io.utils import progress_iter
-from infraslow.processing.spindle import _extract_epoch_stages, _stages_to_int
-from preprocessing import list_valid_subjects
+from infraslow.processing.spindle import _stages_to_int
+from preprocessing import _check_usleep_file_usable, list_valid_subjects
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +84,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--metadata2", default=DEFAULT_METADATA2,
                     help="Second metadata CSV path, combined with --metadata by ID.")
     p.add_argument("--edf-dir", default=DEFAULT_EDF_DIR, help="Directory of {id}.edf files.")
-    p.add_argument("--hypno-dir", default=DEFAULT_HYPNO_DIR,
-                    help="Directory of {id}_Hypnodensity.csv files.")
-    p.add_argument("--epoch-sec", type=float, default=DEFAULT_EPOCH_SEC,
-                    help="Seconds per scored epoch -- sets yasa.sleep_statistics's "
-                         "sf_hyp (1/epoch_sec).")
+    p.add_argument("--usleep-dir", default=os.path.expandvars(
+                        _env_str("USLEEP_DIR", DEFAULT_USLEEP_HYPNODENSITY_DIR)),
+                    help="U-Sleep hypnodensity directory, one subfolder per subject "
+                         "(env: USLEEP_DIR)")
+    p.add_argument("--channel", default=_env_str("CHANNEL", "C3"),
+                    help="EEG channel whose U-Sleep hypnodensity to use -- statistics are "
+                         "per-channel, not a subject-wide average (env: CHANNEL)")
+    p.add_argument("--hypno-epoch-sec", type=float,
+                    default=float(_env_str("HYPNO_EPOCH_SEC", str(DEFAULT_HYPNOGRAM_EPOCH_SEC))),
+                    help="Width (s) of the epoch the native 1-s U-Sleep hypnodensity is "
+                         "averaged into before computing statistics; sets "
+                         "yasa.sleep_statistics's sf_hyp (1/hypno_epoch_sec) (env: HYPNO_EPOCH_SEC)")
     p.add_argument(
         "--output", type=Path,
         default=Path(os.path.expandvars(
@@ -101,26 +114,33 @@ def parse_args() -> argparse.Namespace:
 
 
 def compute_subject_stats(
-    subject_id: str, hypno_dir: Path, *, epoch_sec: float,
+    subject_id: str, usleep_dir: str, channel: str, *, hypno_epoch_sec: float,
 ) -> Dict[str, float]:
-    """One subject's ``yasa.sleep_statistics`` dict, sourced from its Hypnodensity CSV."""
-    csv_path = hypno_dir / f"{subject_id}{DEFAULT_HYPNODENSITY_SUFFIX}"
-    annotations = hypnodensity_to_annotations(csv_path)
-    stages = _extract_epoch_stages(annotations, stage_column="stage")
-    hypno_int = _stages_to_int(stages, DEFAULT_STAGE_MAP)
-    return yasa.sleep_statistics(hypno_int, sf_hyp=1.0 / epoch_sec)
+    """One subject's ``yasa.sleep_statistics`` dict, sourced from ``channel``'s own
+    U-Sleep hypnodensity, reduced from its native 1-s resolution to
+    ``hypno_epoch_sec``-wide epochs (matching ``preprocessing.py``'s convention)."""
+    _check_usleep_file_usable(subject_id, channel, usleep_dir)
+    t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
+    _t_epoch, _probs_epoch, stage_epoch = uh.hypnodensity_to_epoch_hypnogram(
+        t_hyp, probs, epoch_sec=hypno_epoch_sec, src_epoch_sec=DEFAULT_USLEEP_EPOCH_SEC,
+    )
+    hypno_int = _stages_to_int(stage_epoch, DEFAULT_STAGE_MAP)
+    return yasa.sleep_statistics(hypno_int, sf_hyp=1.0 / hypno_epoch_sec)
 
 
 def _compute_or_error(
-    args: Tuple[str, Path, float],
+    args: Tuple[str, str, str, float],
 ) -> Tuple[str, Optional[Dict[str, float]], Optional[str]]:
     """``ProcessPoolExecutor``-friendly wrapper: exceptions can't cross the
     process boundary as live objects, so catch here and ship back the
     formatted traceback text instead for the parent to log.
     """
-    subject_id, hypno_dir, epoch_sec = args
+    subject_id, usleep_dir, channel, hypno_epoch_sec = args
     try:
-        return subject_id, compute_subject_stats(subject_id, hypno_dir, epoch_sec=epoch_sec), None
+        stats = compute_subject_stats(
+            subject_id, usleep_dir, channel, hypno_epoch_sec=hypno_epoch_sec,
+        )
+        return subject_id, stats, None
     except Exception:  # noqa: BLE001 - one bad subject must not sink the run
         return subject_id, None, traceback.format_exc()
 
@@ -133,15 +153,18 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    hypno_dir = Path(os.path.expandvars(args.hypno_dir))
-    subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.hypno_dir)
+    subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.usleep_dir)
     if args.limit:
         subjects = subjects[: args.limit]
     workers = max(1, args.workers)
-    logger.info(f"{len(subjects)} valid subject(s); workers={workers}")
+    logger.info(f"{len(subjects)} valid subject(s); channel={args.channel} "
+                f"hypno_epoch_sec={args.hypno_epoch_sec} workers={workers}")
 
-    tasks = [(subject_id, hypno_dir, args.epoch_sec) for subject_id in subjects]
-    # Each task is one small CSV read + a cheap yasa call, so a large chunksize
+    tasks = [
+        (subject_id, args.usleep_dir, args.channel, args.hypno_epoch_sec)
+        for subject_id in subjects
+    ]
+    # Each task is one small .npy read + a cheap yasa call, so a large chunksize
     # keeps IPC overhead from dominating over ~170k subjects.
     chunksize = max(1, len(tasks) // (workers * 20)) if tasks else 1
 

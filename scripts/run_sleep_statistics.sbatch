@@ -8,15 +8,15 @@
 #SBATCH --cpus-per-task=3
 #SBATCH --mem=8G
 
-# Runs src/scripts/sleep_statistics.py over the same valid Bioserenity cohort
-# as run_preprocessing.sbatch (every subject with both an EDF and a
-# Hypnodensity CSV, via preprocessing.py's list_valid_subjects -- see
+# Runs src/scripts/sleep_statistics.py over the same valid cohort as
+# run_preprocessing.sbatch (every subject with both an EDF and a U-Sleep
+# hypnodensity folder, via preprocessing.py's list_valid_subjects -- see
 # sleep_statistics.py's module docstring), computing YASA sleep statistics
-# straight from each subject's Hypnodensity CSV -- no EDF load needed -- and
-# saving one row per subject to ${OUTPUT}.
+# straight from each subject's --channel (default C3) U-Sleep hypnodensity
+# file -- no EDF load needed -- and saving one row per subject to ${OUTPUT}.
 #
-# Single task, no job array: this only reads small per-subject Hypnodensity
-# CSVs (not full EEG recordings), so it's far cheaper than
+# Single task, no job array: this only reads small per-subject U-Sleep .npy
+# files (not full EEG recordings), so it's far cheaper than
 # run_preprocessing.sbatch's per-channel EEG work.
 #
 # Override at submit time, e.g.:
