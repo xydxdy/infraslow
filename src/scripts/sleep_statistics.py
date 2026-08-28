@@ -51,7 +51,7 @@ import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import yasa
@@ -102,8 +102,20 @@ def parse_args() -> argparse.Namespace:
             _env_str("OUTPUT", "/scratch/users/chaisaen/processed_data/sleep_statistics.csv"))),
         help="Output CSV path (env: OUTPUT).",
     )
+    p.add_argument("--num-shards", type=int, default=1,
+                    help="Split the valid-subject list into this many pieces, matching "
+                         "preprocessing.py's --num-shards convention -- use with "
+                         "--shard-indices to reproduce the exact subject set a "
+                         "preprocessing.py job array touched. Default 1 (no sharding).")
+    p.add_argument("--shard-indices", default="0",
+                    help="Which shard(s) to include: an inclusive range ('0-9') or a "
+                         "comma-separated list ('0,3,7'). Each shard i contributes "
+                         "subjects[i::num_shards], --limit applied per shard -- same "
+                         "per-shard semantics as preprocessing.py's --limit. Default '0' "
+                         "(with the default --num-shards=1, this is the whole list, "
+                         "unchanged from --limit alone).")
     p.add_argument("--limit", type=int, default=None,
-                    help="Process at most this many subjects (quick tests).")
+                    help="Process at most this many subjects per shard (quick tests).")
     p.add_argument(
         "--workers", type=int,
         default=int(_env_str("WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "1"))),
@@ -111,6 +123,36 @@ def parse_args() -> argparse.Namespace:
              "$SLURM_CPUS_PER_TASK, else 1).",
     )
     return p.parse_args()
+
+
+def _parse_shard_indices(spec: str) -> List[int]:
+    """Parse a ``--shard-indices`` spec into a sorted list of ints: an inclusive
+    range (``"0-9"`` -> ``[0, 1, ..., 9]``) or a comma-separated list
+    (``"0,3,7"`` -> ``[0, 3, 7]``); a bare number (``"5"``) is a single shard."""
+    spec = spec.strip()
+    if "-" in spec and "," not in spec:
+        lo, hi = spec.split("-", 1)
+        return list(range(int(lo), int(hi) + 1))
+    return sorted(int(part) for part in spec.split(","))
+
+
+def _select_shard_subjects(
+    subjects: Sequence[str], *, num_shards: int, shard_indices: Sequence[int],
+    per_shard_limit: Optional[int],
+) -> List[str]:
+    """Union, in ``shard_indices`` order, of ``subjects[i::num_shards][:per_shard_limit]``
+    for each shard ``i`` -- replicates exactly what a preprocessing.py job array with
+    the same ``--num-shards``/``--limit`` selects across those shard indices, so a
+    single-task ``sleep_statistics.py`` run can be pointed at the identical subject
+    set. With the defaults (``num_shards=1``, ``shard_indices=[0]``), this reduces to
+    plain ``subjects[:per_shard_limit]`` -- unchanged from ``--limit`` alone."""
+    selected: List[str] = []
+    for shard in shard_indices:
+        shard_subjects = list(subjects[shard::num_shards])
+        if per_shard_limit:
+            shard_subjects = shard_subjects[:per_shard_limit]
+        selected.extend(shard_subjects)
+    return selected
 
 
 def compute_subject_stats(
@@ -154,10 +196,14 @@ def main() -> None:
     )
 
     subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.usleep_dir)
-    if args.limit:
-        subjects = subjects[: args.limit]
+    shard_indices = _parse_shard_indices(args.shard_indices)
+    subjects = _select_shard_subjects(
+        subjects, num_shards=args.num_shards, shard_indices=shard_indices,
+        per_shard_limit=args.limit,
+    )
     workers = max(1, args.workers)
-    logger.info(f"{len(subjects)} valid subject(s); channel={args.channel} "
+    logger.info(f"{len(subjects)} valid subject(s) (num_shards={args.num_shards} "
+                f"shard_indices={shard_indices} limit={args.limit}); channel={args.channel} "
                 f"hypno_epoch_sec={args.hypno_epoch_sec} workers={workers}")
 
     tasks = [

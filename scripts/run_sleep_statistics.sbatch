@@ -22,14 +22,18 @@
 # Override at submit time, e.g.:
 #   sbatch --export=ALL,OUTPUT=/scratch/users/chaisaen/processed_data/sleep_statistics.csv run_sleep_statistics.sbatch
 #   sbatch --export=ALL,LIMIT=50 run_sleep_statistics.sbatch   # quick test: 50 subjects
-#   sbatch --export=ALL,LIMIT=500,HYPNO_EPOCH_SEC=3,OUTPUT=/scratch/users/chaisaen/usleep_dryrun/sleep_statistics.csv \
-#       run_sleep_statistics.sbatch   # dry run: 500 subjects, 3-s U-Sleep epoch
+#   sbatch --export=ALL,NUM_SHARDS=1000,SHARD_INDICES=0-9,LIMIT=50,HYPNO_EPOCH_SEC=3,OUTPUT=/scratch/users/chaisaen/usleep_dryrun/sleep_statistics.csv \
+#       run_sleep_statistics.sbatch   # dry run: same 500 subjects a
+#       # `run_preprocessing.sbatch --array=0-9 --export=ALL,NUM_SHARDS=1000,LIMIT=50,...`
+#       # job array would touch (see sleep_statistics.py's --num-shards/--shard-indices)
 
 set -euo pipefail
 
 OUTPUT="${OUTPUT:-/scratch/users/chaisaen/processed_data/sleep_statistics.csv}"
 LIMIT="${LIMIT:-}"
 HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-}"
+NUM_SHARDS="${NUM_SHARDS:-}"
+SHARD_INDICES="${SHARD_INDICES:-}"
 
 mkdir -p /scratch/users/chaisaen/logs
 
@@ -43,4 +47,6 @@ export PYTHONPATH=/home/users/chaisaen/infraslow/src
 python3 sleep_statistics.py \
     --output "${OUTPUT}" \
     ${LIMIT:+--limit "${LIMIT}"} \
-    ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"}
+    ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"} \
+    ${NUM_SHARDS:+--num-shards "${NUM_SHARDS}"} \
+    ${SHARD_INDICES:+--shard-indices "${SHARD_INDICES}"}
