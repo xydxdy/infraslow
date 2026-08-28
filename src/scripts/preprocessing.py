@@ -23,7 +23,7 @@ Everything else -- bout-finding, per-bout spindle counts, per-bout
 per-stage (N2, N3) and is computed by slicing those two whole-night arrays,
 using each channel's own U-Sleep hypnodensity (not a shared subject-wide
 Bioserenity hypnogram) to find N2/N3 bouts and restrict spindle/slow-wave
-detection -- see the ``usleep/<N>s/`` artifacts above.
+detection -- see the ``usleep/<N>s/`` artifacts below.
 
 Saved layout (one ``<output-dir>/data/<subject>/<channel>/`` tree per
 subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
@@ -32,9 +32,9 @@ subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
         usleep/
             <N>s/                  # N = --hypno-epoch-sec, default 3
                 argmax.npy         # (m,) str stage labels, <N>-s epochs
-                                    # (argmax of average.npy's row)
+                                   # (argmax of average.npy's row)
                 average.npy        # (m, 5) averaged U-Sleep stage probabilities,
-                                    # USLEEP_STAGE_ORDER (Wake,N1,N2,N3,REM) columns
+                                   # USLEEP_STAGE_ORDER (Wake,N1,N2,N3,REM) columns
         envelope/
             sigma.npz             # t_env, power -- whole night
             delta.npz
@@ -233,6 +233,41 @@ def resolve_shard(cli_num_shards: Optional[int], cli_shard_index: Optional[int])
     if not (0 <= shard_index < num_shards):
         raise SystemExit(f"--shard-index {shard_index} out of range for --num-shards {num_shards}")
     return num_shards, shard_index
+
+
+def _validate_hypno_epoch_sec(hypno_epoch_sec: float, sf: float) -> None:
+    """Fail fast if ``hypno_epoch_sec`` would blow up every channel of every
+    subject deep inside :func:`preprocess_channel` instead of before any
+    Slurm-job time is spent.
+
+    Checks the same two whole-number constraints
+    :func:`infraslow.io.usleep_hypnodensity.hypnodensity_to_epoch_hypnogram`
+    and :func:`infraslow.processing.spindle._build_sample_hypno` each need but
+    only discover deep inside per-channel processing (where the resulting
+    ``ValueError`` is swallowed by :func:`preprocess_subject`'s per-channel
+    ``try/except``, letting the run still exit 0):
+
+    1. ``hypno_epoch_sec`` must be a positive integer multiple of the native
+       U-Sleep cadence ``DEFAULT_USLEEP_EPOCH_SEC``.
+    2. ``sf * hypno_epoch_sec`` -- the number of EEG samples per hypnogram
+       epoch -- must be a whole number, or ``yasa.hypno_upsample_to_data``
+       raises inside every spindle/slow-wave detection call.
+    """
+    ratio = hypno_epoch_sec / DEFAULT_USLEEP_EPOCH_SEC
+    n_per_window = round(ratio)
+    if n_per_window < 1 or not np.isclose(ratio, n_per_window):
+        raise SystemExit(
+            f"--hypno-epoch-sec {hypno_epoch_sec} must be a positive integer multiple of "
+            f"the native U-Sleep cadence DEFAULT_USLEEP_EPOCH_SEC ({DEFAULT_USLEEP_EPOCH_SEC})"
+        )
+
+    samples_per_epoch = sf * hypno_epoch_sec
+    if not np.isclose(samples_per_epoch, round(samples_per_epoch)):
+        raise SystemExit(
+            f"--sf {sf} * --hypno-epoch-sec {hypno_epoch_sec} = {samples_per_epoch} must be "
+            f"a whole number of EEG samples per hypnogram epoch (required by "
+            f"yasa.hypno_upsample_to_data)"
+        )
 
 
 def _valid_usleep_subject_ids(
@@ -551,6 +586,7 @@ def preprocess_subject(
 
 def main() -> None:
     args = parse_args()
+    _validate_hypno_epoch_sec(args.hypno_epoch_sec, args.sf)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Shard resolution happens before logging setup so each shard gets its own

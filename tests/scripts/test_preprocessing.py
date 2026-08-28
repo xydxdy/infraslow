@@ -14,7 +14,7 @@ def test_valid_usleep_subject_ids_requires_both_edf_and_usleep_dir():
     assert pp._valid_usleep_subject_ids(ids, edf_names, usleep_names) == ["A"]
 
 
-def test_valid_usleep_subject_ids_sorted_and_deduplicated_by_input():
+def test_valid_usleep_subject_ids_sorted_by_id():
     ids = ["B", "A"]
     edf_names = {"A.edf", "B.edf"}
     usleep_names = {"A", "B"}
