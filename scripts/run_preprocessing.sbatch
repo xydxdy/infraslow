@@ -8,11 +8,13 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 
-# Runs src/scripts/preprocessing.py over the whole valid Bioserenity cohort (every
-# subject with both an EDF and a Hypnodensity CSV), channel C3 only, saving per-subject
-# envelope/temporal_ISFS/bouts/ISFS-spectra trees to
+# Runs src/scripts/preprocessing.py over the whole valid cohort (every subject
+# with both an EDF and a U-Sleep hypnodensity folder), channel C3 only, saving
+# per-subject envelope/temporal_ISFS/bouts/ISFS-spectra/usleep trees to
 # ${OUTPUT_ROOT}/{subject_id}/C3/ (see preprocessing.py's module docstring for
-# the exact layout).
+# the exact layout). The native 1-s U-Sleep hypnodensity is reduced to
+# ${HYPNO_EPOCH_SEC}-s epochs (preprocessing.py's own default: 3) before
+# bout-finding/event detection -- see --hypno-epoch-sec below.
 #
 # Submitted as a 1000-way job array so preprocessing.py's --num-shards/
 # --shard-index split the cohort into 1000 disjoint pieces, one per array
@@ -39,12 +41,15 @@
 #   sbatch --array=0-999 --export=ALL,CHANNELS=C3,OUTPUT_ROOT=/scratch/users/chaisaen/processed_data \
 #       run_preprocessing.sbatch
 #   sbatch --array=0-9 --export=ALL,LIMIT=2 run_preprocessing.sbatch   # quick test: 2 subjects/shard
+#   sbatch --array=0-9 --export=ALL,NUM_SHARDS=1000,LIMIT=50,HYPNO_EPOCH_SEC=3,OUTPUT_ROOT=/scratch/users/chaisaen/usleep_dryrun \
+#       run_preprocessing.sbatch   # dry run: ~500 subjects (10 tasks x 50/task), 3-s U-Sleep epoch
 
 set -euo pipefail
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/users/chaisaen/processed_data}"
 CHANNELS="${CHANNELS:-C3}"
 LIMIT="${LIMIT:-}"
+HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-}"
 
 mkdir -p /scratch/users/chaisaen/logs
 mkdir -p "${OUTPUT_ROOT}"
@@ -66,4 +71,5 @@ python3 preprocessing.py \
     --num-shards "${NUM_SHARDS:-$SLURM_ARRAY_TASK_COUNT}" \
     --shard-index "${SLURM_ARRAY_TASK_ID}" \
     --output-dir "${OUTPUT_ROOT}" \
-    ${LIMIT:+--limit "${LIMIT}"}
+    ${LIMIT:+--limit "${LIMIT}"} \
+    ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"}

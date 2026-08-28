@@ -22,11 +22,14 @@
 # Override at submit time, e.g.:
 #   sbatch --export=ALL,OUTPUT=/scratch/users/chaisaen/processed_data/sleep_statistics.csv run_sleep_statistics.sbatch
 #   sbatch --export=ALL,LIMIT=50 run_sleep_statistics.sbatch   # quick test: 50 subjects
+#   sbatch --export=ALL,LIMIT=500,HYPNO_EPOCH_SEC=3,OUTPUT=/scratch/users/chaisaen/usleep_dryrun/sleep_statistics.csv \
+#       run_sleep_statistics.sbatch   # dry run: 500 subjects, 3-s U-Sleep epoch
 
 set -euo pipefail
 
 OUTPUT="${OUTPUT:-/scratch/users/chaisaen/processed_data/sleep_statistics.csv}"
 LIMIT="${LIMIT:-}"
+HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-}"
 
 mkdir -p /scratch/users/chaisaen/logs
 
@@ -39,4 +42,5 @@ export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
 python3 sleep_statistics.py \
     --output "${OUTPUT}" \
-    ${LIMIT:+--limit "${LIMIT}"}
+    ${LIMIT:+--limit "${LIMIT}"} \
+    ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"}
