@@ -83,13 +83,15 @@ from infraslow import BioserenityPSGLoader
 from infraslow.constants import (
     DEFAULT_EDF_DIR,
     DEFAULT_EEG_CHANNELS,
-    DEFAULT_EPOCH_SEC,
+    DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_METADATA,
     DEFAULT_METADATA2,
     DEFAULT_SF_ENV,
     DEFAULT_STAGE_MAP,
     DEFAULT_SIGMA_BAND,
     DEFAULT_DELTA_BAND,
+    DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC,
+    DEFAULT_USLEEP_EPOCH_SEC,
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
     DEFAULT_WINDOW_SEC,
 )
@@ -101,6 +103,7 @@ from infraslow.io.metadata import (
     load_bioserenity_metadata,
 )
 from infraslow.io.utils import list_dir_filenames
+from infraslow.io import usleep_hypnodensity as uh
 from infraslow.processing.infraslow import eeg_envelope, infraslow_spectrum, isfs_lowpass
 
 logger = logging.getLogger(__name__)
@@ -118,7 +121,7 @@ DELTA_BAND: Tuple[float, float] = DEFAULT_DELTA_BAND
 BANDS: Dict[str, Tuple[float, float]] = {"sigma": SIGMA_BAND, "delta": DELTA_BAND}
 
 SF_ENV: float = DEFAULT_SF_ENV              # 1 Hz envelope rate
-EPOCH_SEC: float = DEFAULT_EPOCH_SEC         # 30 s scored epochs
+HYPNO_EPOCH_SEC: float = DEFAULT_HYPNOGRAM_EPOCH_SEC   # U-Sleep hypnogram epoch width (s)
 MIN_BOUT_SEC: float = 200.0                  # consecutive-stage bout length (s)
 WINDOW_SEC: float = DEFAULT_WINDOW_SEC       # infraslow_spectrum's fixed freq-grid window
 
@@ -274,6 +277,46 @@ def _save_spectra(path: Path, freqs: np.ndarray, psds: np.ndarray, bout_start: n
 
 
 # --------------------------------------------------------------------------- #
+# U-Sleep hypnogram helpers -- per-channel staging (replaces the retired
+# subject-wide Bioserenity Hypnodensity CSV hypnogram).
+# --------------------------------------------------------------------------- #
+def _usleep_epoch_dirname(hypno_epoch_sec: float) -> str:
+    """Directory name for a given hypnogram epoch width, e.g. ``3.0`` -> ``"3s"``,
+    ``2.5`` -> ``"2.5s"``."""
+    return f"{hypno_epoch_sec:g}s"
+
+
+def save_usleep_hypnogram(
+    ch_dir: Path, stage_epoch: np.ndarray, probs_epoch: np.ndarray, *,
+    hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
+) -> Path:
+    """Save one channel's reduced U-Sleep hypnogram under
+    ``ch_dir/usleep/<N>s/argmax.npy`` (str stage labels) and ``average.npy``
+    (averaged stage probabilities). Returns the ``usleep/<N>s`` directory."""
+    usleep_dir = ch_dir / "usleep" / _usleep_epoch_dirname(hypno_epoch_sec)
+    usleep_dir.mkdir(parents=True, exist_ok=True)
+    np.save(usleep_dir / "argmax.npy", np.asarray(stage_epoch, dtype=str))
+    np.save(usleep_dir / "average.npy", np.asarray(probs_epoch, dtype=np.float64))
+    return usleep_dir
+
+
+def _check_usleep_alignment(
+    usleep_duration_sec: float, eeg_duration_sec: float, *,
+    tolerance_sec: float = DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC,
+) -> Optional[str]:
+    """``None`` if the U-Sleep hypnodensity and EEG signal durations agree
+    within ``tolerance_sec``, else a ready-to-log warning message."""
+    diff = abs(usleep_duration_sec - eeg_duration_sec)
+    if diff <= tolerance_sec:
+        return None
+    return (
+        f"U-Sleep hypnodensity duration ({usleep_duration_sec:.1f}s) and EEG "
+        f"signal duration ({eeg_duration_sec:.1f}s) differ by {diff:.1f}s "
+        f"(> {tolerance_sec:.1f}s tolerance)."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Per-channel computation
 # --------------------------------------------------------------------------- #
 def compute_envelopes(
@@ -368,7 +411,7 @@ def preprocess_channel(
     bands: Mapping[str, Tuple[float, float]] = BANDS,
     stages: Sequence[str] = DEFAULT_STAGES,
     stage_codes: Mapping[str, Tuple[int, ...]] = STAGE_CODES,
-    sf_env: float = SF_ENV, epoch_sec: float = EPOCH_SEC,
+    sf_env: float = SF_ENV, epoch_sec: float = HYPNO_EPOCH_SEC,
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
 ) -> None:
     """Compute and save every artifact for one subject/channel (see module docstring)."""
