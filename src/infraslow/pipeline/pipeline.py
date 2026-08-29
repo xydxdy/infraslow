@@ -16,7 +16,9 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from ..constants import DEFAULT_METADATA, DEFAULT_METADATA2, DEFAULT_MIN_BOUT_SEC
+from ..constants import (
+    DEFAULT_HYPNOGRAM_EPOCH_SEC, DEFAULT_METADATA, DEFAULT_METADATA2, DEFAULT_MIN_BOUT_SEC,
+)
 from . import features as pft
 from . import figures as pfg
 from . import io as pio
@@ -31,7 +33,7 @@ _BANDS = ("sigma", "delta")
 # Which artifacts drive the ISFS spectrum + phase-locking analysis in
 # `run_subject_state_channel`, per `event`. "spindle"/sigma is the original (and
 # default) pathway; "sw"/delta is the slow-wave analog -- `preprocessing.py` writes
-# both symmetrically (`bouts.npz["spindle"]` + `spindel_yasa.csv["Peak"]` vs.
+# both symmetrically (`spindle_bouts.npz["spindle"]` + `spindle_yasa.csv["Peak"]` vs.
 # `sw_bouts.npz["sw"]` + `sw_yasa.csv["NegPeak"]`, both against the same underlying
 # `all_bouts`), so this is purely a which-artifacts-to-read switch, not new science.
 _EVENT_SPECS = {
@@ -62,6 +64,9 @@ class PipelineConfig:
     metadata_path: str = DEFAULT_METADATA
     metadata2_path: str = DEFAULT_METADATA2
     sleep_statistics_path: Optional[Path] = None
+    # Must match whatever --hypno-epoch-sec preprocessing.py was run with -- see
+    # run_subject_state_channel's docstring.
+    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC
 
     def __post_init__(self) -> None:
         self.input_dir = Path(self.input_dir)
@@ -78,7 +83,8 @@ class PipelineConfig:
 
 def run_subject_state_channel(
     data_dir: Path, subject_id: str, channel: str, state: str, *,
-    event: str = "spindle", return_curves: bool = False,
+    event: str = "spindle", hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+    return_curves: bool = False,
 ) -> Union[
     Tuple[Optional[dict], List[dict], Optional[dict]],
     Tuple[Optional[dict], List[dict], Optional[dict], Optional[dict]],
@@ -92,12 +98,16 @@ def run_subject_state_channel(
 
     `event` selects which artifact pair drives the ISFS spectrum + phase-locking
     analysis (see `_EVENT_SPECS`): `"spindle"` (default, unchanged behavior) pairs
-    sigma-band ISFS spectra with `bouts.npz["spindle"]`/`spindel_yasa.csv["Peak"]`;
+    sigma-band ISFS spectra with `spindle_bouts.npz["spindle"]`/`spindle_yasa.csv["Peak"]`;
     `"sw"` is the slow-wave analog, pairing delta-band ISFS spectra with
     `sw_bouts.npz["sw"]`/`sw_yasa.csv["NegPeak"]`. Either way, `spindle_count`/
     `slow_wave_count`/`sigma_power_db`/`delta_power_db` are always computed for
     *both* event types and bands in the returned record -- `event` only picks which
     one the spectrum/phase-bin/peak-frequency fields (and `bout_records`) describe.
+
+    `hypno_epoch_sec` must match whatever `--hypno-epoch-sec` `preprocessing.py` was
+    run with -- every bout/event artifact below lives under that epoch width's
+    `<stage>/<N>s/` directory (see `infraslow.pipeline.io.epoch_dirname`).
 
     When `return_curves` is set, a 4th element (the `freqs`/`rel`/`corrected`/
     `bout_peak_freqs` intermediate spectrum arrays, or `None` when no record
@@ -107,14 +117,14 @@ def run_subject_state_channel(
     band, bouts_key = spec["band"], spec["bouts_key"]
     subject_dir = Path(data_dir) / subject_id
     try:
-        event_bouts = spec["load_bouts"](subject_dir, channel, state)
+        event_bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
     except (FileNotFoundError, OSError) as exc:
         failure = dict(subject_id=subject_id, sleep_state=state, channel=channel,
                         stage="bouts", error=str(exc))
         return (None, [], failure, None) if return_curves else (None, [], failure)
 
     # Defensive: preprocessing.py's MIN_BOUT_SEC (see src/scripts/preprocessing.py) already
-    # keeps bouts.npz's/sw_bouts.npz's "all"/event bouts >= this length in a real run, but
+    # keeps spindle_bouts.npz's/sw_bouts.npz's "all"/event bouts >= this length in a real run, but
     # pipeline.py should not blindly trust that every upstream artifact satisfies that
     # invariant.
     if event_bouts[bouts_key].shape[0]:
@@ -127,7 +137,7 @@ def run_subject_state_channel(
         return (None, [], failure, None) if return_curves else (None, [], failure)
 
     try:
-        isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, band)
+        isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, band, hypno_epoch_sec=hypno_epoch_sec)
         selected = psp.select_event_bouts(event_bouts[bouts_key], isfs)
         spectrum_feats, curves = psp.compute_subject_spectrum_features(
             selected["freqs"], selected["psds"], return_curves=True,
@@ -135,7 +145,7 @@ def run_subject_state_channel(
         bout_peak_freqs = psp.compute_bout_peak_freqs(selected["freqs"], selected["psds"])
 
         t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, band)
-        event_summary = spec["load_summary"](subject_dir, channel, state)
+        event_summary = spec["load_summary"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
         peak_col = spec["peak_col"]
         event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
         bouts_data = pph.build_bout_phase_data(t_env, filtered, event_bouts[bouts_key], event_times)
@@ -145,11 +155,14 @@ def run_subject_state_channel(
         # for both event types and both bands, regardless of `event` -- reuse event_bouts/
         # event_summary instead of a redundant re-load when they already *are* the type
         # being reused here.
-        bouts = event_bouts if event == "spindle" else pio.load_stage_bouts(subject_dir, channel, state)
-        sw_bouts = event_bouts if event == "sw" else pio.load_stage_sw_bouts(subject_dir, channel, state)
+        bouts = event_bouts if event == "spindle" else pio.load_stage_bouts(
+            subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
+        sw_bouts = event_bouts if event == "sw" else pio.load_stage_sw_bouts(
+            subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
         spindle_summary = event_summary if event == "spindle" else pio.load_spindle_summary(
-            subject_dir, channel, state)
-        sw_summary = event_summary if event == "sw" else pio.load_sw_summary(subject_dir, channel, state)
+            subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
+        sw_summary = event_summary if event == "sw" else pio.load_sw_summary(
+            subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
         spindle_feats = pft.compute_spindle_features(spindle_summary, bouts["all"])
         sw_feats = pft.compute_slow_wave_features(sw_summary, sw_bouts["all"])
 
@@ -193,6 +206,7 @@ def run_subject_state_channel(
 def find_paired_subject_data(
     data_dir: Path, channel: str, states: Sequence[str] = ("N2", "N3"), *,
     limit: Optional[int] = None, event: str = "spindle",
+    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
 ) -> Dict[str, Dict[str, Tuple[dict, List[dict], dict]]]:
     """The first `limit` subjects (sorted by id, via `pio.discover_subjects`) with a
     valid (non-`None`) record for *every* one of `states` on `channel` -- every eligible
@@ -219,7 +233,8 @@ def find_paired_subject_data(
         per_state: Dict[str, Tuple[dict, List[dict], dict]] = {}
         for state in states:
             record, bout_records, _failure, curves = run_subject_state_channel(
-                data_dir, subject_id, channel, state, event=event, return_curves=True,
+                data_dir, subject_id, channel, state, event=event,
+                hypno_epoch_sec=hypno_epoch_sec, return_curves=True,
             )
             if record is None:
                 break
@@ -260,7 +275,8 @@ def run_pipeline(config: PipelineConfig) -> None:
         for channel in channels:
             for state in config.sleep_states:
                 record, brecs, failure, curves = run_subject_state_channel(
-                    config.data_dir, subject_id, channel, state, return_curves=True,
+                    config.data_dir, subject_id, channel, state,
+                    hypno_epoch_sec=config.hypno_epoch_sec, return_curves=True,
                 )
                 if failure is not None:
                     failures.append(failure)

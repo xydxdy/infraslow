@@ -4,7 +4,7 @@ Pure aggregation of `preprocessing.py`'s already-saved artifacts -- no
 detection is re-run. `preprocessing.py` itself runs spindle/SW detection over
 every epoch of a sleep stage across the *whole night* (not scoped to the
 >= min_bout_sec consecutive-stage bouts `pipeline.py` selects features from),
-so the raw `spindel_yasa.csv`/`sw_yasa.csv` summaries can contain events from
+so the raw `spindle_yasa.csv`/`sw_yasa.csv` summaries can contain events from
 short stage fragments outside any bout. `compute_spindle_features` and
 `compute_slow_wave_features` first filter `summary` down to only the events
 whose onset timestamp (`Peak`/`NegPeak`) falls inside one of `bouts` (via
@@ -51,7 +51,7 @@ def _mean_or_nan(summary: pd.DataFrame, column: str) -> float:
 def compute_spindle_features(summary: pd.DataFrame, bouts: np.ndarray) -> Dict[str, float]:
     """`spindle_count, spindle_density_per_min, spindle_mean_amplitude,
     spindle_mean_frequency, spindle_mean_duration_s` from one subject/state/
-    channel's `spindel_yasa.csv` (filtered to events whose `Peak` falls inside
+    channel's `spindle_yasa.csv` (filtered to events whose `Peak` falls inside
     `bouts`) + that stage's bout array."""
     summary = _filter_events_in_bouts(summary, bouts, "Peak")
     count = int(len(summary))

@@ -3,10 +3,10 @@
 Reproduces `demo_infraslow_yasa_recheck.ipynb`'s Figure 5 pipeline exactly,
 generalized from its one hardcoded subject/channel/bout to any selection of
 bouts, and run against `preprocessing.py`'s already-computed per-bout PSDs
-(`<stage>/ISFS/<band>.npz`) instead of re-running `infraslow_spectrum`. The
+(`<stage>/<N>s/ISFS/<band>.npz`) instead of re-running `infraslow_spectrum`. The
 notebook's bout-selection criterion -- N2/N3 runs >= min_dur AND containing
 >= 1 detected spindle -- is exactly `bouts["spindle"]` from
-`<stage>/bouts.npz` (see `preprocessing.py`'s `preprocess_channel`, which
+`<stage>/<N>s/spindle_bouts.npz` (see `preprocessing.py`'s `preprocess_channel`, which
 saves that exact subset). All fitting/integration math (`fit_isfs`,
 `bigaussian`, `chromatogram_peak_area`) is reused unmodified from
 `infraslow.processing.infraslow` -- nothing here redefines it.

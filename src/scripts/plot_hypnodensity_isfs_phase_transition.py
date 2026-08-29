@@ -85,6 +85,7 @@ from infraslow.io.hypnodensity import load_subject_hypnogram
 from infraslow.stat import state_comparison as stc
 from infraslow.constants import (
     DEFAULT_HYPNO_DIR,
+    DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_MIN_BOUT_SEC,
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
     USLEEP_STAGE_ORDER,
@@ -150,6 +151,11 @@ def parse_args() -> argparse.Namespace:
                     default=float(_env_str("MIN_BOUT_SEC", str(DEFAULT_MIN_BOUT_SEC))),
                     help="Minimum consecutive-stage bout length (s) before transition "
                          "selection (env: MIN_BOUT_SEC)")
+    p.add_argument("--hypno-epoch-sec", type=float,
+                    default=float(_env_str("HYPNO_EPOCH_SEC", str(DEFAULT_HYPNOGRAM_EPOCH_SEC))),
+                    help="Must match whatever --hypno-epoch-sec preprocessing.py was run "
+                         "with -- selects which <stage>/<N>s/ directory to read each "
+                         "subject's bout/event artifacts from (env: HYPNO_EPOCH_SEC)")
     p.add_argument("--window-sec", type=float,
                     default=float(_env_str("TRANSITION_WINDOW_SEC", str(DEFAULT_TRANSITION_WINDOW_SEC))),
                     help="Pre-transition tail length (s): a bout must be at least this "
@@ -235,7 +241,7 @@ def _curve_for_bouts(
 
 
 def _process_subject(
-    task: Tuple[str, Path, str, str, str, Tuple[str, ...], str, float, float, float, int],
+    task: Tuple[str, Path, str, str, str, Tuple[str, ...], str, float, float, float, int, float],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """One subject's full pooled + per-destination-pair pipeline. Loads this
     subject's scored hypnogram once (`load_subject_hypnogram`) and threads it
@@ -252,7 +258,7 @@ def _process_subject(
     pooled case has always used.
     """
     (subject_id, data_dir, usleep_dir, hypno_dir, channel, states, event,
-     min_bout_sec, window_sec, persist_sec, n_phase_points) = task
+     min_bout_sec, window_sec, persist_sec, n_phase_points, hypno_epoch_sec) = task
     spec = _EVENT_SPECS[event]
     band = spec["band"]
 
@@ -283,7 +289,7 @@ def _process_subject(
         tail_all_by_key: Dict[str, np.ndarray] = {}
         any_bouts = False
         for state in states:
-            raw_all = pio.load_stage_bouts(subject_dir, channel, state)["all"]
+            raw_all = pio.load_stage_bouts(subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)["all"]
             if raw_all.shape[0]:
                 durations = raw_all[:, 1] - raw_all[:, 0]
                 raw_all = raw_all[durations >= min_bout_sec]
@@ -316,11 +322,13 @@ def _process_subject(
     curves: Dict[str, np.ndarray] = {}
     for state in states:
         try:
-            raw_event = spec["load_bouts"](subject_dir, channel, state)[spec["bouts_key"]]
+            raw_event = spec["load_bouts"](
+                subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
             if raw_event.shape[0]:
                 durations = raw_event[:, 1] - raw_event[:, 0]
                 raw_event = raw_event[durations >= min_bout_sec]
-            event_summary = spec["load_summary"](subject_dir, channel, state)
+            event_summary = spec["load_summary"](
+                subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
             peak_col = spec["peak_col"]
             event_times = (event_summary[peak_col].to_numpy()
                            if peak_col in event_summary.columns else np.empty(0))
@@ -384,9 +392,13 @@ def main() -> None:
     args.output_dir = args.output_dir / args.event
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "group_stats").mkdir(parents=True, exist_ok=True)
-    # Namespaced by window_sec/persist_sec so switching either parameter against the
-    # same --output-dir can never silently reuse a prior parameter combination's cache.
-    cache_dir = args.output_dir / "cache" / f"w{args.window_sec:g}_p{args.persist_sec:g}" / "pairwise"
+    # Namespaced by hypno_epoch_sec/window_sec/persist_sec so switching any of these
+    # against the same --output-dir can never silently reuse a prior parameter
+    # combination's cache (hypno_epoch_sec matters because it selects which
+    # <stage>/<N>s/ bout artifacts preprocessing.py wrote -- see infraslow.pipeline.
+    # io.epoch_dirname).
+    cache_dir = (args.output_dir / "cache" / pio.epoch_dirname(args.hypno_epoch_sec)
+                 / f"w{args.window_sec:g}_p{args.persist_sec:g}" / "pairwise")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
@@ -410,8 +422,8 @@ def main() -> None:
         candidates = candidates[: args.limit]
     logger.info(f"{len(candidates)} candidate subject(s) under {args.data_dir}; "
                 f"channel={args.channel} states={states} event={args.event!r} "
-                f"window_sec={args.window_sec} persist_sec={args.persist_sec} "
-                f"n_subjects={n_subjects or 'unlimited'} workers={workers}")
+                f"hypno_epoch_sec={args.hypno_epoch_sec} window_sec={args.window_sec} "
+                f"persist_sec={args.persist_sec} n_subjects={n_subjects or 'unlimited'} workers={workers}")
 
     included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]] = {}
     exclusion_reasons: Dict[str, str] = {}
@@ -443,7 +455,7 @@ def main() -> None:
                 tasks = [
                     (sid, args.data_dir, args.usleep_dir, args.hypno_dir, args.channel, states,
                      args.event, args.min_bout_sec, args.window_sec, args.persist_sec,
-                     args.n_phase_points)
+                     args.n_phase_points, args.hypno_epoch_sec)
                     for sid in to_process
                 ]
                 for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):

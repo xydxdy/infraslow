@@ -78,7 +78,7 @@ COLORS = {"N2": (PURPLE, LPURPLE), "N3": (ORANGE, LORANGE)}
 
 STATES = ("N2", "N3")
 # "spindle" selects the sigma-band pathway in run_subject_state_channel (band="sigma",
-# paired against bouts.npz["spindle"]/spindel_yasa.csv["Peak"]) -- it's also the
+# paired against spindle_bouts.npz["spindle"]/spindle_yasa.csv["Peak"]) -- it's also the
 # function's own default, but named explicitly here for parity with
 # plot_n2_vs_n3_compare_delta.py's EVENT = "sw" (band="delta", slow-wave pathway).
 EVENT = "spindle"

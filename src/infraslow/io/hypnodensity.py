@@ -161,15 +161,15 @@ def load_subject_hypnogram(
     epoch_sec: float = DEFAULT_EPOCH_SEC,
 ) -> Tuple[np.ndarray, float]:
     """This subject's whole-night scored stage sequence, in the same positional
-    epoch order `bouts.npz`'s `(start, stop)` offsets were computed from (epoch
-    `i` -> `i * epoch_sec` seconds -- see `preprocessing.py`'s
+    epoch order `spindle_bouts.npz`'s `(start, stop)` offsets were computed from
+    (epoch `i` -> `i * epoch_sec` seconds -- see `preprocessing.py`'s
     `find_stage_bouts`). Returns `(stage_labels, epoch_sec)`; `stage_labels[i]`
     is one of the Hypnodensity CSV's probability-column names (e.g. `"N2"`),
     directly comparable against this pipeline's `state` strings.
 
     Raises:
         FileNotFoundError: no Hypnodensity CSV for this subject under
-            `hypno_dir` (the same file `bouts.npz` was itself built from).
+            `hypno_dir` (the same file `spindle_bouts.npz` was itself built from).
     """
     path = Path(os.path.expandvars(hypno_dir)) / f"{subject_id}{DEFAULT_HYPNODENSITY_SUFFIX}"
     annotations = hypnodensity_to_annotations(path)

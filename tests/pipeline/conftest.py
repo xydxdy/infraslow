@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from infraslow.constants import DEFAULT_HYPNOGRAM_EPOCH_SEC
+from infraslow.pipeline.io import epoch_dirname
+
 SF_ENV = 1.0  # matches DEFAULT_SF_ENV
 
 
@@ -31,16 +34,22 @@ def _write_temporal_isfs(ch_dir: Path, band: str, n_samples: int, seed: int) -> 
     np.savez(ch_dir / "temporal_ISFS" / f"{band}.npz", t_env=t_env, power=filtered)
 
 
-def _write_stage(ch_dir: Path, stage: str, bouts: list, seed: int) -> None:
-    """bouts: list of (start, stop) tuples, all >= 200s, e.g. one every ~300s."""
-    stage_dir = ch_dir / stage
+def _write_stage(ch_dir: Path, stage: str, bouts: list, seed: int, *,
+                  hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC) -> None:
+    """bouts: list of (start, stop) tuples, all >= 200s, e.g. one every ~300s.
+
+    Every bout/event artifact is nested under `<stage>/<hypno_epoch_sec>s/`
+    (default 3s, matching `infraslow.pipeline.io`'s loader defaults), mirroring
+    `preprocessing.py`'s real layout -- see `infraslow.pipeline.io.epoch_dirname`.
+    """
+    stage_dir = ch_dir / stage / epoch_dirname(hypno_epoch_sec)
     (stage_dir / "ISFS").mkdir(parents=True, exist_ok=True)
 
     all_arr = np.asarray(bouts, dtype=np.float64)
     # Every bout "contains a spindle" in this fixture (simplest case); tests
     # that need a bout WITHOUT a spindle build their own tree by hand.
     spindle_arr = all_arr.copy()
-    np.savez(stage_dir / "bouts.npz", all=all_arr, spindle=spindle_arr)
+    np.savez(stage_dir / "spindle_bouts.npz", all=all_arr, spindle=spindle_arr)
 
     sw_arr = all_arr.copy()
     np.savez(stage_dir / "sw_bouts.npz", all=all_arr, sw=sw_arr)
@@ -54,7 +63,7 @@ def _write_stage(ch_dir: Path, stage: str, bouts: list, seed: int) -> None:
             "Duration": 2.0, "Amplitude": 20.0 + rng.normal(0, 1),
             "Frequency": 13.0 + rng.normal(0, 0.2), "Stage": 2 if stage == "N2" else 3,
         })
-    pd.DataFrame(rows).to_csv(stage_dir / "spindel_yasa.csv", index=False)
+    pd.DataFrame(rows).to_csv(stage_dir / "spindle_yasa.csv", index=False)
 
     sw_rows = []
     for i, (a, b) in enumerate(bouts):

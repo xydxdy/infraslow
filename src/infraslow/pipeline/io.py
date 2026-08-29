@@ -6,6 +6,19 @@ none of them touch an EDF, a `BioserenityPSGLoader`, or re-run any
 detection. `subject_dir` throughout is `<data-dir>/<subject_id>` (the
 directory containing one or more channel subdirectories), matching
 `preprocessing.py`'s `output_dir / DATA_DIRNAME / subject_id`.
+
+Bout-finding and spindle/SW detection are restricted by the per-channel
+U-Sleep hypnogram reduced to `--hypno-epoch-sec`-wide epochs (see
+`preprocessing.py`'s `preprocess_channel`), so every artifact downstream of
+that hypnogram (`<stage>/<N>s/spindle_bouts.npz`, `sw_bouts.npz`,
+`spindle_yasa.csv`, `sw_yasa.csv`, `ISFS/<band>.npz`) is nested under a
+`<N>s/` directory the same way `usleep/<N>s/` already is -- so re-running
+preprocessing.py with a different `--hypno-epoch-sec` against the same
+output tree adds a sibling `<N>s/` directory instead of silently
+overwriting a previous epoch width's artifacts. `epoch_dirname` is the
+single source of truth for that `<N>s` formatting, shared by
+`preprocessing.py` (writer) and every loader here (reader) so they can
+never disagree on the directory name for a given epoch width.
 """
 
 from __future__ import annotations
@@ -17,8 +30,16 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from ..constants import DEFAULT_METADATA, DEFAULT_METADATA2
+from ..constants import DEFAULT_HYPNOGRAM_EPOCH_SEC, DEFAULT_METADATA, DEFAULT_METADATA2
 from ..io.metadata import combine_bioserenity_metadata, load_bioserenity_metadata
+
+
+def epoch_dirname(epoch_sec: float) -> str:
+    """Directory name for a given epoch width, e.g. ``3.0`` -> ``"3s"``,
+    ``2.5`` -> ``"2.5s"`` -- shared by every ``<N>s/``-namespaced artifact
+    under a subject/channel tree (``usleep/<N>s/`` and each stage's ``<N>s/``
+    bout/event artifacts)."""
+    return f"{epoch_sec:g}s"
 
 
 def discover_subjects(data_dir: Path) -> List[str]:
@@ -48,41 +69,54 @@ def load_temporal_isfs(subject_dir: Path, channel: str, band: str) -> Tuple[np.n
         return npz["t_env"], npz["power"]
 
 
-def load_stage_bouts(subject_dir: Path, channel: str, stage: str) -> Dict[str, np.ndarray]:
-    """`{"all": (n,2), "spindle": (m,2)}` from `<subject_dir>/<channel>/<stage>/bouts.npz`."""
-    path = Path(subject_dir) / channel / stage / "bouts.npz"
+def load_stage_bouts(
+    subject_dir: Path, channel: str, stage: str, hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+) -> Dict[str, np.ndarray]:
+    """`{"all": (n,2), "spindle": (m,2)}` from
+    `<subject_dir>/<channel>/<stage>/<hypno_epoch_sec>s/spindle_bouts.npz`."""
+    path = Path(subject_dir) / channel / stage / epoch_dirname(hypno_epoch_sec) / "spindle_bouts.npz"
     with np.load(path) as npz:
         return {"all": npz["all"], "spindle": npz["spindle"]}
 
 
-def load_stage_sw_bouts(subject_dir: Path, channel: str, stage: str) -> Dict[str, np.ndarray]:
-    """`{"all": (n,2), "sw": (m,2)}` from `<subject_dir>/<channel>/<stage>/sw_bouts.npz`."""
-    path = Path(subject_dir) / channel / stage / "sw_bouts.npz"
+def load_stage_sw_bouts(
+    subject_dir: Path, channel: str, stage: str, hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+) -> Dict[str, np.ndarray]:
+    """`{"all": (n,2), "sw": (m,2)}` from
+    `<subject_dir>/<channel>/<stage>/<hypno_epoch_sec>s/sw_bouts.npz`."""
+    path = Path(subject_dir) / channel / stage / epoch_dirname(hypno_epoch_sec) / "sw_bouts.npz"
     with np.load(path) as npz:
         return {"all": npz["all"], "sw": npz["sw"]}
 
 
 def load_stage_isfs_spectra(
     subject_dir: Path, channel: str, stage: str, band: str,
+    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
 ) -> Dict[str, np.ndarray]:
     """`{"freqs": (f,), "psds": (n,f), "bout_start": (n,)}` from
-    `<subject_dir>/<channel>/<stage>/ISFS/<band>.npz` -- one PSD per bout in
-    that stage's `bouts.npz["all"]`, same order (both come from the same
-    `all_bouts` list inside `preprocess_channel`)."""
-    path = Path(subject_dir) / channel / stage / "ISFS" / f"{band}.npz"
+    `<subject_dir>/<channel>/<stage>/<hypno_epoch_sec>s/ISFS/<band>.npz` -- one PSD
+    per bout in that stage's `spindle_bouts.npz["all"]`, same order (both come from
+    the same `all_bouts` list inside `preprocess_channel`)."""
+    path = Path(subject_dir) / channel / stage / epoch_dirname(hypno_epoch_sec) / "ISFS" / f"{band}.npz"
     with np.load(path) as npz:
         return {"freqs": npz["freqs"], "psds": npz["psds"], "bout_start": npz["bout_start"]}
 
 
-def load_spindle_summary(subject_dir: Path, channel: str, stage: str) -> pd.DataFrame:
-    """YASA spindle summary from `<subject_dir>/<channel>/<stage>/spindel_yasa.csv`."""
-    path = Path(subject_dir) / channel / stage / "spindel_yasa.csv"
+def load_spindle_summary(
+    subject_dir: Path, channel: str, stage: str, hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+) -> pd.DataFrame:
+    """YASA spindle summary from
+    `<subject_dir>/<channel>/<stage>/<hypno_epoch_sec>s/spindle_yasa.csv`."""
+    path = Path(subject_dir) / channel / stage / epoch_dirname(hypno_epoch_sec) / "spindle_yasa.csv"
     return pd.read_csv(path)
 
 
-def load_sw_summary(subject_dir: Path, channel: str, stage: str) -> pd.DataFrame:
-    """YASA slow-wave summary from `<subject_dir>/<channel>/<stage>/sw_yasa.csv`."""
-    path = Path(subject_dir) / channel / stage / "sw_yasa.csv"
+def load_sw_summary(
+    subject_dir: Path, channel: str, stage: str, hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+) -> pd.DataFrame:
+    """YASA slow-wave summary from
+    `<subject_dir>/<channel>/<stage>/<hypno_epoch_sec>s/sw_yasa.csv`."""
+    path = Path(subject_dir) / channel / stage / epoch_dirname(hypno_epoch_sec) / "sw_yasa.csv"
     return pd.read_csv(path)
 
 
@@ -117,6 +151,7 @@ def load_sleep_statistics(path: Path) -> pd.DataFrame:
 
 
 __all__ = [
+    "epoch_dirname",
     "discover_subjects",
     "discover_channels",
     "load_envelope",

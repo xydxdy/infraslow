@@ -36,14 +36,6 @@ def test_valid_usleep_subject_ids_usleep_only_is_excluded():
     assert pp._valid_usleep_subject_ids(ids, edf_names, usleep_names) == []
 
 
-def test_usleep_epoch_dirname_integer_seconds():
-    assert pp._usleep_epoch_dirname(3.0) == "3s"
-
-
-def test_usleep_epoch_dirname_fractional_seconds():
-    assert pp._usleep_epoch_dirname(2.5) == "2.5s"
-
-
 def test_save_usleep_hypnogram_writes_argmax_and_average(tmp_path: Path):
     ch_dir = tmp_path / "SUBJ001" / "C3"
     stage_epoch = np.array(["N2", "N2", "N3"], dtype=object)

@@ -9,6 +9,16 @@ import pytest
 from infraslow.constants import DEFAULT_METADATA
 from infraslow.pipeline import io as pio
 
+from .conftest import _write_stage
+
+
+def test_epoch_dirname_integer_seconds():
+    assert pio.epoch_dirname(3.0) == "3s"
+
+
+def test_epoch_dirname_fractional_seconds():
+    assert pio.epoch_dirname(2.5) == "2.5s"
+
 
 def test_discover_subjects(fake_subject_tree):
     assert pio.discover_subjects(fake_subject_tree) == ["SUBJ001"]
@@ -61,6 +71,30 @@ def test_load_spindle_summary_has_expected_columns(fake_subject_tree):
     df = pio.load_spindle_summary(subject_dir, "C3", "N2")
     assert len(df) == 3
     assert {"Start", "Peak", "End"}.issubset(df.columns)
+
+
+def test_load_stage_bouts_default_hypno_epoch_sec_matches_preprocessing_default():
+    # DEFAULT_HYPNOGRAM_EPOCH_SEC must stay in sync between preprocessing.py's writer
+    # default and every loader's reader default, or a caller that doesn't pass
+    # hypno_epoch_sec explicitly silently reads the wrong <N>s/ directory.
+    from infraslow.constants import DEFAULT_HYPNOGRAM_EPOCH_SEC
+    assert pio.epoch_dirname(DEFAULT_HYPNOGRAM_EPOCH_SEC) == "3s"
+
+
+def test_load_stage_bouts_different_hypno_epoch_sec_sweeps_coexist(tmp_path):
+    # Writing a second hypno_epoch_sec (5s) for the same subject/stage must not
+    # clobber the first (3s, the fixture default) -- they live in sibling <N>s/ dirs.
+    ch_dir = tmp_path / "data" / "SUBJ001" / "C3"
+    bouts_3s = [(50.0, 350.0), (450.0, 750.0)]
+    bouts_5s = [(60.0, 360.0)]
+    _write_stage(ch_dir, "N2", bouts_3s, seed=1, hypno_epoch_sec=3.0)
+    _write_stage(ch_dir, "N2", bouts_5s, seed=2, hypno_epoch_sec=5.0)
+
+    subject_dir = tmp_path / "data" / "SUBJ001"
+    bouts_a = pio.load_stage_bouts(subject_dir, "C3", "N2", hypno_epoch_sec=3.0)
+    bouts_b = pio.load_stage_bouts(subject_dir, "C3", "N2", hypno_epoch_sec=5.0)
+    assert bouts_a["all"].shape == (2, 2)
+    assert bouts_b["all"].shape == (1, 2)
 
 
 @pytest.mark.skipif(

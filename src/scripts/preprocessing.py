@@ -42,16 +42,22 @@ subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
             sigma.npz             # t_env, power (isfs_lowpass of envelope) -- whole night
             delta.npz
         N2/
-            spindel_yasa.csv      # spindles_detect(..., include=(2,)).summary()
-            bouts.npz             # all, spindle -- (n, 2) [start, stop] arrays (s)
-            sw_yasa.csv           # sw_detect(..., include=(2,)).summary()
-            sw_bouts.npz          # all, sw -- (n, 2) [start, stop] arrays (s)
-            ISFS/
-                sigma.npz         # freqs (shared grid), psds (n_bouts, n_freqs),
+            <N>s/                  # N = --hypno-epoch-sec -- same width as usleep/<N>s/
+                                   # above, since every artifact below is restricted by
+                                   # that epoch's hypnogram; re-running with a different
+                                   # --hypno-epoch-sec adds a sibling <N>s/ dir instead of
+                                   # overwriting this one (see infraslow.pipeline.io.
+                                   # epoch_dirname, the shared writer/reader formatting)
+                spindle_yasa.csv   # spindles_detect(..., include=(2,)).summary()
+                spindle_bouts.npz  # all, spindle -- (n, 2) [start, stop] arrays (s)
+                sw_yasa.csv        # sw_detect(..., include=(2,)).summary()
+                sw_bouts.npz       # all, sw -- (n, 2) [start, stop] arrays (s)
+                ISFS/
+                    sigma.npz      # freqs (shared grid), psds (n_bouts, n_freqs),
                                    # bout_start (n_bouts,) -- ALL bouts, not just
-                                   # spindle-containing ones; select a subset later
-                                   # by matching bout_start against bouts.npz['spindle']
-                delta.npz
+                                   # spindle-containing ones; select a subset later by
+                                   # matching bout_start against spindle_bouts.npz['spindle']
+                    delta.npz
         N3/                       # same as N2, include=(3,)
 
 ``freqs`` is saved once per ``ISFS/*.npz`` (not once per bout) because
@@ -59,8 +65,8 @@ subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
 only depends on ``sf_env``/``window_sec`` (fixed pipeline constants), not on
 any one bout's length -- every bout already shares it. ``t_env`` is likewise
 only saved once per ``envelope``/``temporal_ISFS`` file (not per bout): it is
-fully reconstructable from a bout's own ``(start, stop)`` in ``bouts.npz`` plus
-``SF_ENV``, so storing it per bout would just be duplicate data.
+fully reconstructable from a bout's own ``(start, stop)`` in ``spindle_bouts.npz``
+plus ``SF_ENV``, so storing it per bout would just be duplicate data.
 
 Run via Slurm, not the login node, from this file's own directory
 (``src/scripts/``) with ``src/`` on ``PYTHONPATH`` so ``infraslow`` resolves
@@ -113,6 +119,7 @@ from infraslow.io.metadata import (
 )
 from infraslow.io.utils import list_dir_filenames
 from infraslow.io import usleep_hypnodensity as uh
+from infraslow.pipeline import io as pio
 from infraslow.processing.infraslow import eeg_envelope, infraslow_spectrum, isfs_lowpass
 
 logger = logging.getLogger(__name__)
@@ -144,7 +151,7 @@ DEFAULT_CHANNELS: Tuple[str, ...] = DEFAULT_EEG_CHANNELS
 DATA_DIRNAME: str = "data"
 LOGS_DIRNAME: str = "logs"
 
-# Minimal columns guaranteed present in spindel_yasa.csv even when zero
+# Minimal columns guaranteed present in spindle_yasa.csv even when zero
 # spindles are detected (a real detection's summary() has YASA's full schema;
 # only these three are ever consumed downstream -- see bout/spindle assignment).
 _EMPTY_SPINDLE_COLUMNS: Tuple[str, ...] = ("Start", "Peak", "End")
@@ -329,12 +336,6 @@ def _save_spectra(path: Path, freqs: np.ndarray, psds: np.ndarray, bout_start: n
 # U-Sleep hypnogram helpers -- per-channel staging (replaces the retired
 # subject-wide Bioserenity Hypnodensity CSV hypnogram).
 # --------------------------------------------------------------------------- #
-def _usleep_epoch_dirname(hypno_epoch_sec: float) -> str:
-    """Directory name for a given hypnogram epoch width, e.g. ``3.0`` -> ``"3s"``,
-    ``2.5`` -> ``"2.5s"``."""
-    return f"{hypno_epoch_sec:g}s"
-
-
 def save_usleep_hypnogram(
     ch_dir: Path, stage_epoch: np.ndarray, probs_epoch: np.ndarray, *,
     hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
@@ -342,7 +343,7 @@ def save_usleep_hypnogram(
     """Save one channel's reduced U-Sleep hypnogram under
     ``ch_dir/usleep/<N>s/argmax.npy`` (str stage labels) and ``average.npy``
     (averaged stage probabilities). Returns the ``usleep/<N>s`` directory."""
-    usleep_dir = ch_dir / "usleep" / _usleep_epoch_dirname(hypno_epoch_sec)
+    usleep_dir = ch_dir / "usleep" / pio.epoch_dirname(hypno_epoch_sec)
     usleep_dir.mkdir(parents=True, exist_ok=True)
     np.save(usleep_dir / "argmax.npy", np.asarray(stage_epoch, dtype=str))
     np.save(usleep_dir / "average.npy", np.asarray(probs_epoch, dtype=np.float64))
@@ -430,7 +431,7 @@ def compute_bout_spectra(
     """``(freqs, psds, bout_start)`` -- one :func:`infraslow_spectrum` per bout,
     stacked, from *every* bout passed in (not just spindle-containing ones --
     filter later using ``bout_start``, e.g. by matching it against
-    ``bouts.npz['spindle']``'s own start times).
+    ``spindle_bouts.npz['spindle']``'s own start times).
 
     ``freqs`` is shared across every bout (see :func:`infraslow_spectrum`'s
     fixed, length-independent grid) so ``psds`` is a plain ``(n_bouts,
@@ -537,7 +538,11 @@ def preprocess_channel(
         _save_timeseries(ch_dir / "temporal_ISFS" / f"{name}.npz", t_env, filtered)
 
     for stage in stages:
-        stage_dir = ch_dir / stage
+        # Nested under <N>s/ (N = hypno_epoch_sec), mirroring usleep/<N>s/ above --
+        # every artifact saved below is restricted by that epoch's hypnogram, so a
+        # rerun with a different --hypno-epoch-sec adds a sibling <N>s/ dir instead
+        # of overwriting this one (see infraslow.pipeline.io.epoch_dirname).
+        stage_dir = ch_dir / stage / pio.epoch_dirname(hypno_epoch_sec)
         (stage_dir / "ISFS").mkdir(parents=True, exist_ok=True)
         codes = stage_codes[stage]
 
@@ -557,8 +562,8 @@ def preprocess_channel(
             peak_column="Peak", empty_columns=_EMPTY_SPINDLE_COLUMNS,
             epoch_sec=hypno_epoch_sec,
         )
-        spindle_summary.to_csv(stage_dir / "spindel_yasa.csv", index=False)
-        _save_bouts(stage_dir / "bouts.npz", all_bouts, spindle_bouts, event_key="spindle")
+        spindle_summary.to_csv(stage_dir / "spindle_yasa.csv", index=False)
+        _save_bouts(stage_dir / "spindle_bouts.npz", all_bouts, spindle_bouts, event_key="spindle")
 
         sw_summary, sw_bouts = _detect_stage_events(
             sw_detect, loader, channel, codes, all_bouts,

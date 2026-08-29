@@ -10,8 +10,8 @@ computation happens here -- every number below comes from
 ``infraslow.pipeline.pipeline.run_subject_state_channel(..., event="sw")`` and
 ``infraslow.stat.state_comparison``, reused unmodified from the rest of the project.
 ``event="sw"`` pairs delta-band ISFS spectra with ``sw_bouts.npz["sw"]``/
-``sw_yasa.csv["NegPeak"]`` events instead of sigma/``bouts.npz["spindle"]``/
-``spindel_yasa.csv["Peak"]`` -- everything else (feature names, phase-bin machinery,
+``sw_yasa.csv["NegPeak"]`` events instead of sigma/``spindle_bouts.npz["spindle"]``/
+``spindle_yasa.csv["Peak"]`` -- everything else (feature names, phase-bin machinery,
 statistics) is identical to the sigma script.
 
 Compares **N2 vs N3** on one channel across every eligible subject in ``<data-dir>``
@@ -84,7 +84,7 @@ COLORS = {"N2": (PURPLE, LPURPLE), "N3": (ORANGE, LORANGE)}
 STATES = ("N2", "N3")
 # "sw" selects the delta/slow-wave pathway in run_subject_state_channel (band="delta",
 # paired against sw_bouts.npz["sw"]/sw_yasa.csv["NegPeak"]) instead of the default
-# "spindle" pathway (band="sigma", bouts.npz["spindle"]/spindel_yasa.csv["Peak"]) that
+# "spindle" pathway (band="sigma", spindle_bouts.npz["spindle"]/spindle_yasa.csv["Peak"]) that
 # plot_n2_vs_n3_compare.py uses.
 EVENT = "sw"
 REQUIRED_RECORD_KEYS = {

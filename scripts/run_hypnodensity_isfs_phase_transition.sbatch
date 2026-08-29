@@ -39,6 +39,9 @@ mkdir -p /scratch/users/chaisaen/logs
 DATA_DIR="${DATA_DIR:-$SCRATCH/processed_data/data}"
 USLEEP_DIR="${USLEEP_DIR:-$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities}"
 HYPNO_DIR="${HYPNO_DIR:-$OAK/psg/Bioserenity/Sleep_Staging}"
+# Must match whatever --hypno-epoch-sec preprocessing.py was run with -- selects
+# which <stage>/<N>s/ directory to read each subject's bout/event artifacts from.
+HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-3}"
 CHANNEL="${CHANNEL:-C3}"
 STATES="${STATES:-N2 N3}"
 EVENT="${EVENT:-sw}"
@@ -65,6 +68,7 @@ python3 plot_hypnodensity_isfs_phase_transition.py \
     --event "$EVENT" \
     --window-sec "$TRANSITION_WINDOW_SEC" \
     --persist-sec "$TRANSITION_PERSIST_SEC" \
+    --hypno-epoch-sec "$HYPNO_EPOCH_SEC" \
     --n-phase-points "$N_PHASE_POINTS" \
     --n-subjects "$N_SUBJECTS" \
     --workers "${SLURM_CPUS_PER_TASK:-1}" \

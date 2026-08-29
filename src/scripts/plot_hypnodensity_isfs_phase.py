@@ -98,6 +98,7 @@ from infraslow.pipeline import phase as pph
 from infraslow.io import usleep_hypnodensity as uh
 from infraslow.stat import state_comparison as stc
 from infraslow.constants import (
+    DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_MIN_BOUT_SEC,
     DEFAULT_USLEEP_EPOCH_SEC,
     DEFAULT_USLEEP_HYPNODENSITY_DIR,
@@ -158,6 +159,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-bout-sec", type=float,
                     default=float(_env_str("MIN_BOUT_SEC", str(DEFAULT_MIN_BOUT_SEC))),
                     help="Minimum consecutive-stage bout length (s) (env: MIN_BOUT_SEC)")
+    p.add_argument("--hypno-epoch-sec", type=float,
+                    default=float(_env_str("HYPNO_EPOCH_SEC", str(DEFAULT_HYPNOGRAM_EPOCH_SEC))),
+                    help="Must match whatever --hypno-epoch-sec preprocessing.py was run "
+                         "with -- selects which <stage>/<N>s/ directory to read each "
+                         "subject's bout/event artifacts from (env: HYPNO_EPOCH_SEC). Not "
+                         "the same knob as --usleep-epoch-sec below.")
     p.add_argument("--usleep-epoch-sec", type=float,
                     default=float(_env_str("USLEEP_EPOCH_SEC", str(DEFAULT_USLEEP_EPOCH_SEC))),
                     help="Average the native 1-s U-Sleep hypnodensity into windows this "
@@ -190,14 +197,17 @@ def parse_args() -> argparse.Namespace:
 def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
                   states: Sequence[str], band: str, *,
                   min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
-                  usleep_epoch_sec: float = DEFAULT_USLEEP_EPOCH_SEC) -> dict:
+                  usleep_epoch_sec: float = DEFAULT_USLEEP_EPOCH_SEC,
+                  hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC) -> dict:
     """Load and align one subject's U-Sleep hypnodensity with its infraslow phase time
     series, or raise with a short, categorized reason.
 
     `usleep_epoch_sec` averages the native 1-s hypnodensity into coarser
     `usleep_epoch_sec`-wide windows (via `uh.hypnodensity_to_epoch_hypnogram`) before
     it's matched to phase samples -- a no-op at the default 1.0 (each "window" is a
-    single native row).
+    single native row). `hypno_epoch_sec` is a different knob: it must match whatever
+    `--hypno-epoch-sec` `preprocessing.py` was run with, since that's what selects
+    which `<stage>/<N>s/` directory this subject's bout artifacts live under.
 
     Returns a dict with keys `t_hyp`, `probs` (hypnodensity, `usleep_epoch_sec`-wide
     rows), `phase` (this subject's whole-recording phase series, pooled across every
@@ -220,7 +230,7 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
 
     phase_parts = []
     for state in states:
-        bouts = pio.load_stage_bouts(subject_dir, channel, state)["all"]
+        bouts = pio.load_stage_bouts(subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)["all"]
         if bouts.shape[0]:
             durations = bouts[:, 1] - bouts[:, 0]
             bouts = bouts[durations >= min_bout_sec]
@@ -239,12 +249,13 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
 
 
 def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str, state: str, *,
-                                   event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC):
+                                   event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
+                                   hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC):
     """This subject/state's `phase_bin_rates` (% of `event`s in each of the 8 discrete
     ISFS phase bins), or `None` if there are no usable `event`-containing bouts."""
     spec = _EVENT_SPECS[event]
     subject_dir = Path(data_dir) / subject_id
-    bouts = spec["load_bouts"](subject_dir, channel, state)[spec["bouts_key"]]
+    bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
     if bouts.shape[0]:
         durations = bouts[:, 1] - bouts[:, 0]
         bouts = bouts[durations >= min_bout_sec]
@@ -252,7 +263,7 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
         return None
 
     t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, spec["band"])
-    event_summary = spec["load_summary"](subject_dir, channel, state)
+    event_summary = spec["load_summary"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
     peak_col = spec["peak_col"]
     event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
 
@@ -283,7 +294,7 @@ def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: i
 
 
 def _process_subject(
-    task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int, float],
+    task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int, float, float],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """One subject's full Section 3/4.1/4.2 pipeline. Returns
     ``(subject_id, included, exclusion_reason, rates_by_state, curves_by_state)`` --
@@ -292,12 +303,13 @@ def _process_subject(
     ``rates_by_state``, same as the notebook's Section 4.2 restricting itself to
     Section 4.1's usable subject set)."""
     (subject_id, data_dir, usleep_dir, channel, states, event, min_bout_sec, n_phase_points,
-     usleep_epoch_sec) = task
+     usleep_epoch_sec, hypno_epoch_sec) = task
     band = _EVENT_SPECS[event]["band"]
 
     try:
         data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
-                             min_bout_sec=min_bout_sec, usleep_epoch_sec=usleep_epoch_sec)
+                             min_bout_sec=min_bout_sec, usleep_epoch_sec=usleep_epoch_sec,
+                             hypno_epoch_sec=hypno_epoch_sec)
     except Exception as exc:  # noqa: BLE001 - a missing, empty, or corrupt artifact
         # (e.g. a 0-byte npz from a killed prior job raises EOFError, not caught by
         # the FileNotFoundError/ValueError/OSError this used to only catch) excludes
@@ -309,7 +321,8 @@ def _process_subject(
     for state in states:
         try:
             feats = subject_event_phase_bin_rates(data_dir, subject_id, channel, state,
-                                                    event=event, min_bout_sec=min_bout_sec)
+                                                    event=event, min_bout_sec=min_bout_sec,
+                                                    hypno_epoch_sec=hypno_epoch_sec)
         except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
             feats = None
         if feats is None or sum(feats["phase_bin_rates"]) <= 0:
@@ -484,11 +497,12 @@ def build_correlation_figure(
                 error_kw=dict(ecolor=CORR_NEUTRAL, elinewidth=1.0))
         ax.axvline(0, color=CORR_NEUTRAL, linewidth=1.2, zorder=0)
 
-        for yi, r, n in zip(y, summary["mean_r"], summary["n"]):
+        for yi, r, n, sig in zip(y, summary["mean_r"], summary["n"], summary["significant_FDR"]):
             if np.isnan(r):
                 continue
             label_x = r + (0.02 * xlim if r >= 0 else -0.02 * xlim)
-            ax.text(label_x, yi, f"{r:+.2f}", va="center", ha="left" if r >= 0 else "right",
+            label = f"{r:+.2f}" + (" *" if bool(sig) else "")
+            ax.text(label_x, yi, label, va="center", ha="left" if r >= 0 else "right",
                     fontsize=10, fontweight="bold", color="#2a2a28")
 
         ax.set_yticks(y)
@@ -496,9 +510,7 @@ def build_correlation_figure(
         ax.set_xlim(-xlim, xlim)
         ax.set_xlabel(f"correlation r\n({event_label} % vs. stage probability, across ISFS phase)", fontsize=9)
         n_subjects = int(np.nanmax(summary["n"])) if len(summary) else 0
-        all_sig = bool(summary["significant_FDR"].fillna(False).all())
-        q_note = "all q < 0.05" if all_sig else "see stat_summary CSV for q-values"
-        ax.set_title(f"{state}-restricted phase\n(n = {n_subjects:,} subjects, {q_note})",
+        ax.set_title(f"{state}-restricted phase\n(n = {n_subjects:,} subjects)",
                      fontsize=11, fontweight="bold")
         ax.spines[["top", "right"]].set_visible(False)
         ax.spines[["left", "bottom"]].set_color(CORR_NEUTRAL)
@@ -514,7 +526,8 @@ def build_correlation_figure(
               ha="center", va="top", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.93,
               f"per-subject Pearson r ({event_label}-% curve vs. stage-probability curve over the phase cycle),\n"
-              "one-sample t-test on Fisher-z(r), BH-FDR across stages; error bars = SEM",
+              "one-sample t-test on Fisher-z(r), BH-FDR across stages; error bars = SEM; "
+              "* = significant after FDR (q < 0.05)",
               ha="center", va="top", fontsize=9, color="#4a4a46")
     fig.tight_layout(rect=[0, 0.04, 1, 0.84])
     return fig
@@ -604,7 +617,7 @@ def main() -> None:
     logger.info(f"{len(candidates)} candidate subject(s) under {args.data_dir}; "
                 f"channel={args.channel} states={states} event={args.event!r} "
                 f"n_subjects={n_subjects or 'unlimited'} workers={workers} "
-                f"usleep_epoch_sec={args.usleep_epoch_sec}")
+                f"hypno_epoch_sec={args.hypno_epoch_sec} usleep_epoch_sec={args.usleep_epoch_sec}")
 
     included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]] = {}
     exclusion_reasons: Dict[str, str] = {}
@@ -638,7 +651,8 @@ def main() -> None:
             if to_process:
                 tasks = [
                     (sid, args.data_dir, args.usleep_dir, args.channel, states, args.event,
-                     args.min_bout_sec, args.n_phase_points, args.usleep_epoch_sec)
+                     args.min_bout_sec, args.n_phase_points, args.usleep_epoch_sec,
+                     args.hypno_epoch_sec)
                     for sid in to_process
                 ]
                 for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):
