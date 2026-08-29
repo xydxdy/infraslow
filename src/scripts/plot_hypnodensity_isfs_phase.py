@@ -70,6 +70,28 @@ clobbering each other's output:
                                 state's figure/stat_summary (i.e. common_ids)
     {event}_stage_phase_corr.png/.pdf -- diverging bar chart of stat_summary_{state}'s
                                 mean_r per stage, one panel per state
+    isfs_spectrum_{state}.pdf/.png -- group-level (subject-balanced) baseline-corrected
+                                ISFS spectrum + bi-Gaussian fit, one file per state --
+                                the group-level analog of demo_infraslow_yasa_average.
+                                ipynb's Fig C-i right panel (see build_isfs_spectrum_figure)
+    isfs_spectrum_features_{state}.csv -- every per-subject ISFS spectral fit value
+                                (peak_freq_hz, bandwidth_hz, auc, bi_gaussian_*,
+                                real_peak_freq_hz, etc. -- see subject_isfs_spectrum_features/
+                                infraslow.pipeline.spectrum.compute_subject_spectrum_features),
+                                one row per subject usable for that state's spectrum
+    isfs_peak_distribution_{state}.pdf/.png -- histogram of each subject's own real/
+                                empirical ISFS peak frequency (subject-balanced: one
+                                value per subject, from that subject's own bout-averaged
+                                spectrum -- see build_peak_distribution_figure)
+    isfs_bout_peak_freqs_{state}.csv -- every individual event-containing bout's own
+                                empirical peak frequency, one row per subject (columns
+                                subject_id, n_bouts, peak_1..peak_N, NaN-padded to the
+                                max bout count across subjects) -- the full per-bout
+                                detail behind isfs_peak_distribution_{state}'s subject-
+                                balanced histogram
+    group_stats/{state}_isfs_spectrum.npz -- freqs, rel_mean, corrected_mean/_sem,
+                                real_peak_freq_hz, fit_* (bi-Gaussian popt/mu/lo/hi/
+                                bandwidth/auc/threshold/detected), n_subjects, subject_ids
     summary.txt             -- Section 5's subject-inclusion/usable-count summary
     cache/{subject_id}.npz  -- one per scanned subject, enables resuming after a
                                 timeout/OOM/crash without reprocessing finished subjects
@@ -95,8 +117,15 @@ import yasa
 
 from infraslow.pipeline import io as pio
 from infraslow.pipeline import phase as pph
+from infraslow.pipeline import spectrum as psp
 from infraslow.io import usleep_hypnodensity as uh
 from infraslow.stat import state_comparison as stc
+from infraslow.processing.infraslow import (
+    DEFAULT_BASELINE_BAND,
+    DEFAULT_INFRASLOW_BAND,
+    bigaussian,
+    fit_isfs,
+)
 from infraslow.constants import (
     DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_MIN_BOUT_SEC,
@@ -271,6 +300,45 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
     return pph.compute_subject_phase_features(bouts_data)
 
 
+def subject_isfs_spectrum_features(data_dir: Path, subject_id: str, channel: str, state: str, *,
+                                    event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
+                                    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC) -> Optional[dict]:
+    """This subject/state's ISFS spectral fit -- the bi-Gaussian ``fit_isfs``/relative-
+    power pathway ``infraslow.pipeline.spectrum``/``pipeline.py`` already use (matches
+    ``demo_infraslow_yasa_average.ipynb``'s Fig C-i right panel in spirit, but reuses this
+    project's standard bi-Gaussian fit instead of that notebook's own simplified
+    symmetric-Gaussian one). Returns ``None`` if there are no usable `event`-containing
+    bouts, mirroring ``subject_event_phase_bin_rates``.
+
+    Returns a dict with keys `freqs`, `rel`, `corrected` (this subject's own mean
+    relative-power / baseline-corrected spectrum across its `event`-containing bouts),
+    `feats` (`infraslow.pipeline.spectrum.compute_subject_spectrum_features`'s dict --
+    `peak_freq_hz`, `bandwidth_hz`, `auc`, `bi_gaussian_*`, `real_peak_freq_hz`, etc.),
+    and `bout_peak_freqs` (this subject's own per-bout empirical peak frequencies,
+    `infraslow.pipeline.spectrum.compute_bout_peak_freqs`)."""
+    spec = _EVENT_SPECS[event]
+    subject_dir = Path(data_dir) / subject_id
+    bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
+    if bouts.shape[0]:
+        durations = bouts[:, 1] - bouts[:, 0]
+        bouts = bouts[durations >= min_bout_sec]
+    if bouts.shape[0] == 0:
+        return None
+
+    isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, spec["band"],
+                                        hypno_epoch_sec=hypno_epoch_sec)
+    selected = psp.select_event_bouts(bouts, isfs)
+    if selected["psds"].shape[0] == 0:
+        return None
+
+    feats, curves = psp.compute_subject_spectrum_features(
+        selected["freqs"], selected["psds"], return_curves=True,
+    )
+    bout_peak_freqs = psp.compute_bout_peak_freqs(selected["freqs"], selected["psds"])
+    return dict(freqs=curves["freqs"], rel=curves["rel"], corrected=curves["corrected"],
+                feats=feats, bout_peak_freqs=bout_peak_freqs)
+
+
 def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: int) -> np.ndarray:
     """This subject's own mean hypnodensity probability vector across `n_points`
     equal-width bins spanning the continuous ISFS phase `(-pi, pi]` -- (n_points,
@@ -295,13 +363,16 @@ def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: i
 
 def _process_subject(
     task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int, float, float],
-) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, dict]]:
     """One subject's full Section 3/4.1/4.2 pipeline. Returns
-    ``(subject_id, included, exclusion_reason, rates_by_state, curves_by_state)`` --
-    ``rates_by_state``/``curves_by_state`` only ever contain a state key when that
-    state was usable for it (``curves_by_state`` is always a subset of
-    ``rates_by_state``, same as the notebook's Section 4.2 restricting itself to
-    Section 4.1's usable subject set)."""
+    ``(subject_id, included, exclusion_reason, rates_by_state, curves_by_state,
+    spectrum_by_state)`` -- ``rates_by_state``/``curves_by_state``/``spectrum_by_state``
+    only ever contain a state key when that state was usable for it (``curves_by_state``
+    is always a subset of ``rates_by_state``, same as the notebook's Section 4.2
+    restricting itself to Section 4.1's usable subject set; ``spectrum_by_state`` is
+    computed alongside ``rates_by_state`` -- it depends only on event-containing bouts,
+    not on Section 4.2's continuous-phase coverage, so it is not restricted to
+    ``curves_by_state``)."""
     (subject_id, data_dir, usleep_dir, channel, states, event, min_bout_sec, n_phase_points,
      usleep_epoch_sec, hypno_epoch_sec) = task
     band = _EVENT_SPECS[event]["band"]
@@ -314,10 +385,11 @@ def _process_subject(
         # (e.g. a 0-byte npz from a killed prior job raises EOFError, not caught by
         # the FileNotFoundError/ValueError/OSError this used to only catch) excludes
         # this subject, it must never crash the whole worker pool.
-        return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}
+        return subject_id, False, f"{type(exc).__name__}: {exc}", {}, {}, {}
 
     rates: Dict[str, np.ndarray] = {}
     curves: Dict[str, np.ndarray] = {}
+    spectrum: Dict[str, dict] = {}
     for state in states:
         try:
             feats = subject_event_phase_bin_rates(data_dir, subject_id, channel, state,
@@ -330,13 +402,22 @@ def _process_subject(
         rates[state] = np.asarray(feats["phase_bin_rates"])
 
         try:
+            spec_data = subject_isfs_spectrum_features(data_dir, subject_id, channel, state,
+                                                         event=event, min_bout_sec=min_bout_sec,
+                                                         hypno_epoch_sec=hypno_epoch_sec)
+        except Exception:  # noqa: BLE001 - ditto
+            spec_data = None
+        if spec_data is not None:
+            spectrum[state] = spec_data
+
+        try:
             curve = subject_phase_locked_probs_continuous(data, state=state, n_points=n_phase_points)
         except Exception:  # noqa: BLE001 - ditto
             continue
         if not np.isnan(curve).any():
             curves[state] = curve
 
-    return subject_id, True, None, rates, curves
+    return subject_id, True, None, rates, curves, spectrum
 
 
 def _categorize(reason: str) -> str:
@@ -533,11 +614,93 @@ def build_correlation_figure(
     return fig
 
 
+def build_isfs_spectrum_figure(
+    state: str, *, channel: str, event_label: str, freqs: np.ndarray,
+    corrected_mean: np.ndarray, corrected_sem: np.ndarray, fit: dict,
+    real_peak_freq: float, n_subjects: int,
+    infraslow_band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
+) -> plt.Figure:
+    """Group-level (subject-balanced) baseline-corrected ISFS spectrum with its
+    bi-Gaussian fit -- the group-level counterpart of
+    `demo_infraslow_yasa_average.ipynb`'s Fig C-i right panel (there: one cohort's
+    grand-mean spectrum + a simple symmetric-Gaussian fit; here: each subject's own
+    mean spectrum averaged first -- `_mean_sem` across `corrected_mean`'s per-subject
+    rows -- then the bi-Gaussian `fit_isfs` this project's pipeline already uses
+    elsewhere, matching `demo_infraslow_phase.ipynb` Figure 5B's styling)."""
+    band_m = (freqs >= infraslow_band[0]) & (freqs <= infraslow_band[1])
+    popt, mu = fit["popt"], fit["mu"]
+    lo, hi = fit["lo"], fit["hi"]
+    threshold, detected = fit["threshold"], fit["detected"]
+    f_auc = np.linspace(lo, hi, 400)  # matches fit_isfs's own AUC integration grid
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.fill_between(freqs[band_m], (corrected_mean - corrected_sem)[band_m],
+                     (corrected_mean + corrected_sem)[band_m], color=LPURPLE, alpha=0.4,
+                     zorder=2, label="mean +/- SEM (across subjects)")
+    ax.plot(freqs[band_m], corrected_mean[band_m], color="0.15", lw=1.8, zorder=3,
+             label="baseline-corrected")
+    fg = np.linspace(*infraslow_band, 400)
+    ax.plot(fg, bigaussian(fg, *popt), color=PURPLE, lw=2, zorder=4, label="bi-Gaussian fit")
+    ax.axhline(threshold, ls=":", color="0.3", zorder=1, label="threshold (1.5x SD)")
+    ax.fill_between(f_auc, bigaussian(f_auc, *popt), color=LPURPLE, alpha=0.7, zorder=2,
+                     label="area under curve (+/-1 SD)")
+    ax.plot([mu], [bigaussian(mu, *popt)], "o", color="k", ms=7, zorder=5,
+             label="peak frequency (fit)")
+    real_peak_y = corrected_mean[band_m][int(np.argmin(np.abs(freqs[band_m] - real_peak_freq)))]
+    ax.plot([real_peak_freq], [real_peak_y], "x", color="crimson", ms=9, mew=2, zorder=6,
+             label=f"peak at {real_peak_freq:.4f} Hz")
+    ax.hlines(bigaussian(lo, *popt), lo, hi, color="k", lw=2, zorder=5, label="bandwidth (+/-1 SD)")
+    ax.set(xlim=infraslow_band, xlabel="Frequency (Hz)", ylabel="Relative spectral power",
+           title=f"{state} ({channel}): group ISFS spectrum -- {event_label} bouts\n"
+                 f"(n={n_subjects} subjects, ISFS detected: {detected})")
+    ax.legend(frameon=True, fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def build_peak_distribution_figure(
+    state: str, *, channel: str, event_label: str, subject_peak_freqs: np.ndarray,
+    group_fit_peak: float, group_real_peak: float,
+    infraslow_band: Tuple[float, float] = DEFAULT_INFRASLOW_BAND,
+) -> plt.Figure:
+    """Histogram of each subject's own empirical ISFS peak frequency
+    (`feats["real_peak_freq_hz"]`, argmax of that subject's own mean relative-power
+    spectrum across their `event`-containing bouts) -- one value per subject, i.e.
+    each subject's own bouts are already averaged together before this histogram
+    pools across subjects, never raw per-bout peaks pooled directly (that per-bout
+    detail is instead saved in full to `isfs_bout_peak_freqs_{state}.csv`, one row
+    per subject)."""
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bin_w = 0.005
+    bins = np.arange(infraslow_band[0], infraslow_band[1] + bin_w, bin_w)
+    ax.hist(subject_peak_freqs, bins=bins, color=LPURPLE, edgecolor="0.3", zorder=2)
+    ax.axvline(group_real_peak, color="crimson", lw=2, ls="--", zorder=4,
+               label=f"mean-spectrum peak ({group_real_peak:.4f} Hz)")
+    ax.axvline(group_fit_peak, color=PURPLE, lw=2, ls="-", zorder=4,
+               label=f"bi-Gaussian fit peak ({group_fit_peak:.4f} Hz)")
+    ax.set(xlim=infraslow_band, xlabel="Peak frequency (Hz)", ylabel="Number of subjects",
+           title=f"{state} ({channel}): distribution of subject-level ISFS peak frequency\n"
+                 f"({event_label}, n={len(subject_peak_freqs)} subjects)")
+    ax.legend(frameon=True, fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 # --------------------------------------------------------------------------- #
 # Per-subject checkpoint cache -- lets a resumed run skip subjects a prior,
 # killed/timed-out/OOM'd invocation already finished, instead of reprocessing
 # the whole candidate list from scratch.
 # --------------------------------------------------------------------------- #
+# Fixed key order for flattening a subject_isfs_spectrum_features "feats" dict into a
+# single float array for the npz cache (and back) -- must match
+# infraslow.pipeline.spectrum.compute_subject_spectrum_features's returned keys exactly.
+_SPECTRUM_FEAT_KEYS: Tuple[str, ...] = (
+    "peak_freq_hz", "peak_period_s", "bandwidth_hz", "auc", "chromatogram_peak_area",
+    "bi_gaussian_amp", "bi_gaussian_mu", "bi_gaussian_sd_l", "bi_gaussian_sd_r",
+    "isfs_detected", "isfs_threshold", "real_peak_freq_hz", "real_peak_period_s",
+)
+
+
 def _cache_path(cache_dir: Path, subject_id: str) -> Path:
     return cache_dir / f"{subject_id}.npz"
 
@@ -545,15 +708,27 @@ def _cache_path(cache_dir: Path, subject_id: str) -> Path:
 def _write_cache(
     cache_dir: Path, subject_id: str, ok: bool, reason: Optional[str],
     rates: Dict[str, np.ndarray], curves: Dict[str, np.ndarray],
+    spectrum: Optional[Dict[str, dict]] = None,
 ) -> None:
     """Persist one subject's `_process_subject` result, written atomically (temp
     file + rename) so a job killed mid-write never leaves a corrupt cache entry
-    that a later resume would have to guard against."""
+    that a later resume would have to guard against. `spectrum` defaults to `{}`
+    (optional) so callers that never compute it -- e.g.
+    `plot_hypnodensity_isfs_phase_transition.py`, which imports this function
+    unchanged -- don't need to pass it."""
     payload = {"ok": np.array(ok), "reason": np.array(reason or "")}
     for state, arr in rates.items():
         payload[f"rates_{state}"] = arr
     for state, arr in curves.items():
         payload[f"curves_{state}"] = arr
+    for state, spec_data in (spectrum or {}).items():
+        payload[f"spec_freqs_{state}"] = spec_data["freqs"]
+        payload[f"spec_rel_{state}"] = spec_data["rel"]
+        payload[f"spec_corrected_{state}"] = spec_data["corrected"]
+        payload[f"spec_bout_peaks_{state}"] = spec_data["bout_peak_freqs"]
+        payload[f"spec_feats_{state}"] = np.array(
+            [float(spec_data["feats"][k]) for k in _SPECTRUM_FEAT_KEYS]
+        )
     # Must already end in ".npz" -- np.savez silently appends ".npz" to any filename
     # that doesn't, which would otherwise write "<subject_id>.tmp.npz" while this
     # variable still points at "<subject_id>.npz.tmp", breaking the rename below.
@@ -564,11 +739,13 @@ def _write_cache(
 
 def _read_cache(
     cache_dir: Path, subject_id: str, states: Sequence[str],
-) -> Optional[Tuple[bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
+) -> Optional[Tuple[bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, dict]]]:
     """This subject's cached `_process_subject` result, or `None` if there is no
     cache entry yet -- or it's unreadable (e.g. left mid-write by a killed job
     before the atomic rename in `_write_cache` took effect), in which case the
-    subject is simply reprocessed instead of failing the whole run."""
+    subject is simply reprocessed instead of failing the whole run. Always returns
+    a 5-tuple (`spectrum` is `{}` for a cache entry written before spectrum support
+    was added, or by a caller -- e.g. the transition script -- that never passes it)."""
     path = _cache_path(cache_dir, subject_id)
     if not path.exists():
         return None
@@ -578,7 +755,16 @@ def _read_cache(
             reason = str(npz["reason"][()]) or None
             rates = {s: npz[f"rates_{s}"] for s in states if f"rates_{s}" in npz.files}
             curves = {s: npz[f"curves_{s}"] for s in states if f"curves_{s}" in npz.files}
-        return ok, reason, rates, curves
+            spectrum = {}
+            for s in states:
+                if f"spec_freqs_{s}" not in npz.files:
+                    continue
+                spectrum[s] = dict(
+                    freqs=npz[f"spec_freqs_{s}"], rel=npz[f"spec_rel_{s}"],
+                    corrected=npz[f"spec_corrected_{s}"], bout_peak_freqs=npz[f"spec_bout_peaks_{s}"],
+                    feats=dict(zip(_SPECTRUM_FEAT_KEYS, npz[f"spec_feats_{s}"].tolist())),
+                )
+        return ok, reason, rates, curves, spectrum
     except Exception:  # noqa: BLE001 - corrupt/partial cache entry -- reprocess, don't crash
         return None
 
@@ -619,7 +805,7 @@ def main() -> None:
                 f"n_subjects={n_subjects or 'unlimited'} workers={workers} "
                 f"hypno_epoch_sec={args.hypno_epoch_sec} usleep_epoch_sec={args.usleep_epoch_sec}")
 
-    included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]] = {}
+    included: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, dict]]] = {}
     exclusion_reasons: Dict[str, str] = {}
     n_scanned = 0
     chunk_size = max(workers * 4, workers)
@@ -640,11 +826,11 @@ def main() -> None:
                 if cached is None:
                     to_process.append(sid)
                     continue
-                ok, reason, rates, curves = cached
+                ok, reason, rates, curves, spectrum = cached
                 n_scanned += 1
                 n_from_cache += 1
                 if ok:
-                    included[sid] = (rates, curves)
+                    included[sid] = (rates, curves, spectrum)
                 else:
                     exclusion_reasons[sid] = reason
 
@@ -655,14 +841,14 @@ def main() -> None:
                      args.hypno_epoch_sec)
                     for sid in to_process
                 ]
-                for subject_id, ok, reason, rates, curves in pool.map(_process_subject, tasks):
+                for subject_id, ok, reason, rates, curves, spectrum in pool.map(_process_subject, tasks):
                     n_scanned += 1
                     # Written immediately, one subject at a time, so a crash/OOM/timeout
                     # partway through this chunk only costs the in-flight subjects, not
                     # the ones already finished.
-                    _write_cache(cache_dir, subject_id, ok, reason, rates, curves)
+                    _write_cache(cache_dir, subject_id, ok, reason, rates, curves, spectrum)
                     if ok:
-                        included[subject_id] = (rates, curves)
+                        included[subject_id] = (rates, curves, spectrum)
                     else:
                         exclusion_reasons[subject_id] = reason
 
@@ -772,6 +958,101 @@ def main() -> None:
         fig_c.savefig(png_path_c)
         plt.close(fig_c)
         logger.info(f"saved {state} pi/2-centered figure to {pdf_path_c} and {png_path_c}")
+
+        # --- ISFS spectral peak-frequency analysis (group-level, subject-balanced) ---
+        # Its own subject set (spectrum_ids), not common_ids: this only needs a usable
+        # event-containing-bout spectrum, not Section 4.2's continuous-phase coverage.
+        spectrum_by_sid = {sid: included[sid][2][state] for sid in subject_ids if state in included[sid][2]}
+        if not spectrum_by_sid:
+            logger.warning(f"{state}: no subject has a usable ISFS spectrum -- skipping "
+                            "spectrum figure/CSV outputs")
+        else:
+            spectrum_ids = sorted(spectrum_by_sid)
+            freqs = spectrum_by_sid[spectrum_ids[0]]["freqs"]
+            rel_stack = np.stack([spectrum_by_sid[sid]["rel"] for sid in spectrum_ids])
+            corrected_stack = np.stack([spectrum_by_sid[sid]["corrected"] for sid in spectrum_ids])
+            # Subject-balanced: each subject's own mean spectrum (already averaged across
+            # their event-containing bouts in subject_isfs_spectrum_features) first, then
+            # mean +/- SEM across subjects -- matches demo_infraslow_yasa_average.ipynb's
+            # Fig C-i methodology, never raw per-bout PSDs pooled across subjects.
+            rel_mean, _rel_sem = _mean_sem(rel_stack)
+            corrected_mean, corrected_sem = _mean_sem(corrected_stack)
+
+            spec_band_m = (freqs >= DEFAULT_INFRASLOW_BAND[0]) & (freqs <= DEFAULT_INFRASLOW_BAND[1])
+            real_peak_idx = int(np.argmax(rel_mean[spec_band_m]))
+            real_peak_freq = float(freqs[spec_band_m][real_peak_idx])
+            group_fit = fit_isfs(freqs, corrected_mean, infraslow_band=DEFAULT_INFRASLOW_BAND,
+                                  baseline_band=DEFAULT_BASELINE_BAND)
+            logger.info(f"{state}: group ISFS fit -- detected={group_fit['detected']} "
+                        f"peak={group_fit['mu']:.4f} Hz auc={group_fit['auc']:.3g} "
+                        f"(n={len(spectrum_ids)} subjects)")
+
+            np.savez(
+                args.output_dir / "group_stats" / f"{state}_isfs_spectrum.npz",
+                freqs=freqs, rel_mean=rel_mean, corrected_mean=corrected_mean,
+                corrected_sem=corrected_sem, real_peak_freq_hz=real_peak_freq,
+                fit_popt=group_fit["popt"], fit_mu=group_fit["mu"], fit_lo=group_fit["lo"],
+                fit_hi=group_fit["hi"], fit_bandwidth=group_fit["bandwidth"], fit_auc=group_fit["auc"],
+                fit_threshold=group_fit["threshold"], fit_detected=group_fit["detected"],
+                n_subjects=len(spectrum_ids), subject_ids=np.asarray(spectrum_ids),
+            )
+
+            spec_fig = build_isfs_spectrum_figure(
+                state, channel=args.channel, event_label=event_label, freqs=freqs,
+                corrected_mean=corrected_mean, corrected_sem=corrected_sem, fit=group_fit,
+                real_peak_freq=real_peak_freq, n_subjects=len(spectrum_ids),
+            )
+            spec_pdf_path = args.output_dir / f"isfs_spectrum_{state}.pdf"
+            spec_png_path = args.output_dir / f"isfs_spectrum_{state}.png"
+            spec_fig.savefig(spec_pdf_path)
+            spec_fig.savefig(spec_png_path)
+            plt.close(spec_fig)
+            logger.info(f"saved {state} ISFS spectrum figure to {spec_pdf_path} and {spec_png_path}")
+
+            # Every per-subject spectral fit value, one row per subject.
+            feat_df = pd.DataFrame(
+                [{"subject_id": sid, **spectrum_by_sid[sid]["feats"]} for sid in spectrum_ids]
+            )
+            feat_csv_path = args.output_dir / f"isfs_spectrum_features_{state}.csv"
+            feat_df.to_csv(feat_csv_path, index=False)
+            logger.info(f"saved {state} per-subject ISFS spectral features to {feat_csv_path}")
+
+            # Subject-balanced peak-frequency distribution: one value per subject (that
+            # subject's own real/empirical peak, from their own bout-averaged spectrum),
+            # never raw per-bout peaks pooled directly across subjects.
+            subject_peak_freqs = np.array(
+                [spectrum_by_sid[sid]["feats"]["real_peak_freq_hz"] for sid in spectrum_ids]
+            )
+            peak_fig = build_peak_distribution_figure(
+                state, channel=args.channel, event_label=event_label,
+                subject_peak_freqs=subject_peak_freqs, group_fit_peak=group_fit["mu"],
+                group_real_peak=real_peak_freq,
+            )
+            peak_pdf_path = args.output_dir / f"isfs_peak_distribution_{state}.pdf"
+            peak_png_path = args.output_dir / f"isfs_peak_distribution_{state}.png"
+            peak_fig.savefig(peak_pdf_path)
+            peak_fig.savefig(peak_png_path)
+            plt.close(peak_fig)
+            logger.info(f"saved {state} peak-frequency distribution figure to "
+                        f"{peak_pdf_path} and {peak_png_path}")
+
+            # Every individual event-containing bout's own empirical peak frequency, one
+            # row per subject -- unlike the plot above (one subject-balanced value per
+            # subject), this keeps every bout's peak, ragged/NaN-padded to the max bout
+            # count across subjects since subjects have differing bout counts.
+            max_bouts = max(len(spectrum_by_sid[sid]["bout_peak_freqs"]) for sid in spectrum_ids)
+            peak_cols = [f"peak_{i + 1}" for i in range(max_bouts)]
+            bout_peak_rows = []
+            for sid in spectrum_ids:
+                peaks_sid = spectrum_by_sid[sid]["bout_peak_freqs"]
+                row = {"subject_id": sid, "n_bouts": len(peaks_sid)}
+                row.update({col: (peaks_sid[i] if i < len(peaks_sid) else np.nan)
+                             for i, col in enumerate(peak_cols)})
+                bout_peak_rows.append(row)
+            bout_peak_df = pd.DataFrame(bout_peak_rows, columns=["subject_id", "n_bouts"] + peak_cols)
+            bout_peak_csv_path = args.output_dir / f"isfs_bout_peak_freqs_{state}.csv"
+            bout_peak_df.to_csv(bout_peak_csv_path, index=False)
+            logger.info(f"saved {state} per-subject per-bout peak frequencies to {bout_peak_csv_path}")
 
     corr_fig = build_correlation_figure(
         corr_summaries, channel=args.channel, event_label=event_label, stage_order=stage_order,
