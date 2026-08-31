@@ -34,7 +34,7 @@ DEFAULT_HYPNO_DIR = "$OAK/psg/Bioserenity/Sleep_Staging"
 #: shape ``(n_seconds, 5)``, columns in ``USLEEP_STAGE_ORDER`` order. A different data
 #: source from ``DEFAULT_HYPNO_DIR``'s 30-s Bioserenity Hypnodensity CSVs (see
 #: ``infraslow.io.usleep_hypnodensity``).
-DEFAULT_USLEEP_HYPNODENSITY_DIR = "$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities"
+DEFAULT_USLEEP_HYPNODENSITY_DIR = "$OAK/psg/Bioserenity/USleep"
 DEFAULT_DRUG_EXCLUDE_LIST = str(REPO_ROOT / "drug" / "drug_exclude.csv")
 
 

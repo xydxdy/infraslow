@@ -2,10 +2,10 @@
 #SBATCH --job-name=hypnodensity_isfs_phase
 #SBATCH --partition=mignot
 #SBATCH --output=/scratch/users/chaisaen/logs/hypnodensity_isfs_phase_%j.out
-#SBATCH --time=1:00:00
+#SBATCH --time=4:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=10GB
 
 # Runs src/scripts/plot_hypnodensity_isfs_phase.py: subject-balanced average U-Sleep
@@ -38,9 +38,12 @@
 # post-hoc averaging of the native 1-s U-Sleep hypnodensity before matching it
 # to phase samples. Sweep 3/5/10 s USLEEP_EPOCH_SEC on 100 subjects as three
 # separate jobs (against a fixed HYPNO_EPOCH_SEC matching your preprocessing run):
-#   sbatch --job-name=hypnodensity_isfs_phase_3s  --export=ALL,USLEEP_EPOCH_SEC=3, run_hypnodensity_isfs_phase.sbatch
-#   sbatch --job-name=hypnodensity_isfs_phase_5s  --export=ALL,USLEEP_EPOCH_SEC=5, run_hypnodensity_isfs_phase.sbatch
-#   sbatch --job-name=hypnodensity_isfs_phase_10s --export=ALL,USLEEP_EPOCH_SEC=10, run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_3s_sp  --export=ALL,USLEEP_EPOCH_SEC=3,EVENT=spindle run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_5s_sp  --export=ALL,USLEEP_EPOCH_SEC=5,EVENT=spindle run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_10s_sp --export=ALL,USLEEP_EPOCH_SEC=10,EVENT=spindle run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_3s_sw  --export=ALL,USLEEP_EPOCH_SEC=3,EVENT=sw run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_5s_sw  --export=ALL,USLEEP_EPOCH_SEC=5,EVENT=sw run_hypnodensity_isfs_phase.sbatch
+#   sbatch --job-name=hypnodensity_isfs_phase_10s_sw --export=ALL,USLEEP_EPOCH_SEC=10,EVENT=sw run_hypnodensity_isfs_phase.sbatch
 #
 # Run `python3 plot_hypnodensity_isfs_phase.py --help` for what each flag does.
 
@@ -49,8 +52,7 @@ set -euo pipefail
 mkdir -p /scratch/users/chaisaen/logs
 
 # --- Parameters (edit values here, or override via --export=ALL,VAR=value) ---
-DATA_DIR="${DATA_DIR:-$SCRATCH/processed_data/data}"
-USLEEP_DIR="${USLEEP_DIR:-$OAK/AISleepScientist/data/bioserenity/usleep_hypnodensities}"
+DATA_DIR="${DATA_DIR:-$SCRATCH/usleep_dryrun/data}"
 CHANNEL="${CHANNEL:-C3}"
 STATES="${STATES:-N2 N3}"
 EVENT="${EVENT:-spindle}"
@@ -59,7 +61,7 @@ N_SUBJECTS="${N_SUBJECTS:-0}"
 HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-3}"
 USLEEP_EPOCH_SEC="${USLEEP_EPOCH_SEC:-3}"
 LIMIT="${LIMIT:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/outputs/hypnodensity_isfs_phase_dryrun}/hypno${HYPNO_EPOCH_SEC}s/epoch${USLEEP_EPOCH_SEC}s"
+OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/usleep_dryrun/outputs}/hypno${HYPNO_EPOCH_SEC}s/epoch${USLEEP_EPOCH_SEC}s"
 
 # Initialize conda for non-interactive Slurm shell
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -70,7 +72,6 @@ export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
 python3 plot_hypnodensity_isfs_phase.py \
     --data-dir "$DATA_DIR" \
-    --usleep-dir "$USLEEP_DIR" \
     --channel "$CHANNEL" \
     --states $STATES \
     --event "$EVENT" \
