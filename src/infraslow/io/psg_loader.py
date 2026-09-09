@@ -63,7 +63,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..constants import BIOSERENITY_ALIAS_MAP
+from ..constants import BIOSERENITY_ALIAS_MAP, DEFAULT_EDF_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -269,9 +269,9 @@ class BioserenityPSGLoader:
 
     Path convention::
 
-        $<oak_env_var>/<relative_subdir>/<subject_id>.edf
+        <edf_dir>/<subject_id>.edf
 
-    which with the defaults is ``$OAK/psg/Bioserenity/edf/<subject_id>.edf``.
+    which with the default ``edf_dir`` is ``$OAK/psg/Bioserenity/edf/<subject_id>.edf``.
 
     Parameters
     ----------
@@ -289,11 +289,11 @@ class BioserenityPSGLoader:
         If ``True``, any unresolved requested channel (missing or lost to a
         conflict) raises :class:`ChannelResolutionError` during :meth:`load`.
         If ``False`` (default), unresolved channels are recorded and logged.
-    oak_env_var:
-        Name of the environment variable holding the storage root (default
-        ``"OAK"``).
-    relative_subdir:
-        Sub-path under the storage root where EDFs live.
+    edf_dir:
+        Directory containing ``<subject_id>.edf`` files. May reference
+        environment variables (expanded via :func:`os.path.expandvars`).
+        Defaults to :data:`~infraslow.constants.DEFAULT_EDF_DIR`
+        (``"$OAK/psg/Bioserenity/edf"``).
     case_insensitive:
         Match aliases against physical labels ignoring case (default ``True``).
         Surrounding whitespace is always ignored.
@@ -355,8 +355,7 @@ class BioserenityPSGLoader:
     alias_map: Optional[Mapping[str, Sequence[str]]] = None
     requested_channels: Optional[Sequence[str]] = None
     strict: bool = False
-    oak_env_var: str = "OAK"
-    relative_subdir: str = "psg/Bioserenity/edf"
+    edf_dir: str = DEFAULT_EDF_DIR
     case_insensitive: bool = True
     sf: Optional[float] = None
     rate_lookup: Optional[RateLookup] = None
@@ -525,8 +524,8 @@ class BioserenityPSGLoader:
     # ------------------------------------------------------------------ #
     def load(self) -> "BioserenityPSGLoader":
         """Validate, open, resolve and extract. Returns ``self`` for chaining."""
-        oak_root = self._resolve_oak_root()
-        self._edf_path = self._build_and_validate_edf_path(oak_root)
+        data_dir = self._resolve_edf_dir()
+        self._edf_path = self._build_and_validate_edf_path(data_dir)
         logger.info("Loading subject %s from %s", self.subject_id, self._edf_path)
 
         self._inst = self._attach_edf(self._edf_path)
@@ -583,23 +582,18 @@ class BioserenityPSGLoader:
                 f"subject_id {sid!r} contains path separators or unsafe tokens."
             )
 
-    def _resolve_oak_root(self) -> Path:
-        raw = os.environ.get(self.oak_env_var)
-        if not raw:
+    def _resolve_edf_dir(self) -> Path:
+        expanded = os.path.expandvars(self.edf_dir)
+        if "$" in expanded:
             raise EnvironmentVariableError(
-                f"Environment variable ${self.oak_env_var} is not set."
+                f"edf_dir references an unset environment variable: {self.edf_dir!r}"
             )
-        root = Path(raw)
-        if not root.is_dir():
-            raise DirectoryNotFoundError(
-                f"${self.oak_env_var} does not point at a directory: {root}"
-            )
-        return root
-
-    def _build_and_validate_edf_path(self, oak_root: Path) -> Path:
-        data_dir = oak_root / self.relative_subdir
+        data_dir = Path(expanded)
         if not data_dir.is_dir():
             raise DirectoryNotFoundError(f"Data directory does not exist: {data_dir}")
+        return data_dir
+
+    def _build_and_validate_edf_path(self, data_dir: Path) -> Path:
         edf_path = data_dir / f"{self.subject_id}.edf"
         if not edf_path.is_file():
             raise EDFFileNotFoundError(f"EDF file does not exist: {edf_path}")
