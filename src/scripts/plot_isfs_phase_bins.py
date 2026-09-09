@@ -49,7 +49,7 @@ from scipy.signal import find_peaks
 
 from infraslow import BioserenityPSGLoader
 from infraslow.constants import (
-    DEFAULT_EPOCH_SEC,
+    DEFAULT_HYPNOGRAM_EPOCH_SEC,
     DEFAULT_ISFS_MIN_EVENTS,
     DEFAULT_ISFS_PERIOD,
     DEFAULT_SF_ENV,
@@ -295,14 +295,18 @@ def main():
                 f'min_bout_sec={args.min_bout_sec} window_sec={args.window_sec} '
                 f'output_dir={args.output_dir}')
 
+    # requested_channels=[args.channel] also makes args.channel the default
+    # annotation_loader's usleep_channel (see BioserenityPSGLoader.usleep_channel),
+    # so loader.annotations is already this subject/channel's own 3-s U-Sleep
+    # hypnogram once load() returns.
     loader = BioserenityPSGLoader(
         subject_id=args.subject, sf=args.sf, requested_channels=[args.channel]
     ).load()
     data = np.asarray(loader.get_channel(args.channel), dtype=float)
     sf = float(loader.sf)
 
-    bouts_all = nrem2_bouts(loader, epoch_sec=DEFAULT_EPOCH_SEC, min_dur=args.min_bout_sec)
-    sp = spindles_detect(loader, ch_names=args.channel, include=(2,))
+    bouts_all = nrem2_bouts(loader, epoch_sec=DEFAULT_HYPNOGRAM_EPOCH_SEC, min_dur=args.min_bout_sec)
+    sp = spindles_detect(loader, ch_names=args.channel, include=(2,), epoch_sec=DEFAULT_HYPNOGRAM_EPOCH_SEC)
     peaks = sp.summary()['Peak'].to_numpy()
     bouts = [(a, b) for a, b in bouts_all if np.any((peaks >= a) & (peaks < b))]
     logger.info(f'{len(bouts)}/{len(bouts_all)} N2 bout(s) >= {args.min_bout_sec:g}s contain >= 1 spindle')

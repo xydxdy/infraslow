@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 
 from ..constants import (
     BIOSERENITY_ALIAS_MAP,
@@ -159,9 +160,93 @@ def hypnodensity_probs_at_times(
     return probs[idx]
 
 
+def make_usleep_annotation_loader(
+    channel: str,
+    *,
+    base_dir: str = DEFAULT_USLEEP_HYPNODENSITY_DIR,
+    alias_map: Mapping[str, Sequence[str]] = BIOSERENITY_ALIAS_MAP,
+    epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC,
+    src_epoch_sec: float = DEFAULT_USLEEP_EPOCH_SEC,
+    stage_order: Sequence[str] = USLEEP_STAGE_ORDER,
+    required: bool = True,
+) -> Callable[[Any, Path], Optional[pd.DataFrame]]:
+    """Build an ``annotation_loader`` for :class:`BioserenityPSGLoader` from U-Sleep.
+
+    The returned callable matches the loader's ``annotation_loader(inst, edf_path)``
+    contract: after the loader opens an EDF, it reads ``channel``'s 1-s U-Sleep
+    hypnodensity (:func:`load_usleep_hypnodensity`) and reduces it to an
+    ``epoch_sec`` hypnogram (:func:`hypnodensity_to_epoch_hypnogram`); the result
+    becomes available as ``loader.annotations`` -- a DataFrame with one row per
+    epoch and columns ``["t", *stage_order, "stage"]`` (bin-centered epoch time,
+    one probability column per stage in ``stage_order``, then the argmax
+    ``stage`` label) -- both the per-epoch *hypnodensity* (the probability
+    columns) and the *hypnogram* (``stage``) in one table, the same ``stage``
+    column shape :func:`infraslow.processing.spindle.spindles_detect` already
+    expects from ``loader.annotations['stage']``. This is
+    :class:`BioserenityPSGLoader`'s default annotation source (see its
+    ``usleep_channel``/``annotation_loader`` docs); build one directly only to
+    override the channel, epoching, or U-Sleep directory.
+
+    The subject id is taken from the EDF file stem, matching
+    :func:`~infraslow.io.hypnodensity.make_hypnodensity_annotation_loader`'s own
+    convention.
+
+    Args:
+        channel: Canonical channel name (an ``alias_map`` key) whose U-Sleep
+            hypnodensity to load, e.g. ``"C3"``.
+        base_dir: Root directory of the per-subject U-Sleep ``.npy`` files.
+        alias_map: Canonical-channel -> physical-alias map used to resolve the
+            on-disk filename (see :func:`resolve_usleep_channel_path`).
+        epoch_sec: Width (s) of the reduced hypnogram's epochs (default 3 s).
+        src_epoch_sec: Sampling interval (s) of the raw hypnodensity rows
+            (default 1 s, matching U-Sleep's native output).
+        stage_order: Column order of the raw hypnodensity (defaults to
+            :data:`~infraslow.constants.USLEEP_STAGE_ORDER`).
+        required: If ``True`` (default), a missing U-Sleep file raises
+            :class:`FileNotFoundError` (surfaced by the loader as
+            ``AnnotationLoadError``). If ``False``, a missing file yields ``None``.
+
+    Usage::
+
+        from infraslow import BioserenityPSGLoader
+        from infraslow.io.usleep_hypnodensity import make_usleep_annotation_loader
+
+        loader = BioserenityPSGLoader(
+            subject_id="318562",
+            requested_channels=["C3"],
+            annotation_loader=make_usleep_annotation_loader("C3"),
+        ).load()
+        loader.annotations  # ["t", "Wake", "N1", "N2", "N3", "REM", "stage"] DataFrame,
+                            # one row per epoch_sec epoch
+    """
+
+    def _annotation_loader(inst: Any, edf_path: Path) -> Optional[pd.DataFrame]:
+        subject_id = Path(edf_path).stem
+        try:
+            t_hyp, probs = load_usleep_hypnodensity(
+                subject_id, channel, base_dir=base_dir, alias_map=alias_map,
+                epoch_sec=src_epoch_sec,
+            )
+        except FileNotFoundError:
+            if required:
+                raise
+            return None
+        t_epoch, probs_epoch, stage_epoch = hypnodensity_to_epoch_hypnogram(
+            t_hyp, probs, epoch_sec=epoch_sec, src_epoch_sec=src_epoch_sec,
+            stage_order=stage_order,
+        )
+        annotations = pd.DataFrame(probs_epoch, columns=list(stage_order))
+        annotations.insert(0, "t", t_epoch)
+        annotations["stage"] = stage_epoch
+        return annotations
+
+    return _annotation_loader
+
+
 __all__ = [
     "resolve_usleep_channel_path",
     "load_usleep_hypnodensity",
     "hypnodensity_to_epoch_hypnogram",
     "hypnodensity_probs_at_times",
+    "make_usleep_annotation_loader",
 ]

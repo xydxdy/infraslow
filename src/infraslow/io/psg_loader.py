@@ -324,15 +324,26 @@ class BioserenityPSGLoader:
         Callback ``(inst, edf_path) -> Any`` invoked after signals load; its
         return value is exposed via :attr:`annotations`. When left ``None``
         (default), it resolves to
-        :func:`~infraslow.io.hypnodensity.make_hypnodensity_annotation_loader`,
-        so a plain loader automatically attaches the subject's
-        ``(timestamp, stage)`` hypnodensity hypnogram. Pass an explicit callable
-        to parse a different annotation format,
-        ``make_hypnodensity_annotation_loader(required=False)`` to tolerate a
-        missing hypnodensity file (yielding ``None`` instead of raising), or a
-        no-op ``lambda inst, edf_path: None`` to skip annotations entirely.
+        :func:`~infraslow.io.usleep_hypnodensity.make_usleep_annotation_loader`
+        keyed on :attr:`usleep_channel`, so a plain loader automatically attaches
+        the subject/channel's own U-Sleep hypnodensity, reduced to a per-epoch
+        ``stage`` hypnogram. Pass an explicit callable to parse a different
+        annotation format (e.g.
+        :func:`~infraslow.io.hypnodensity.make_hypnodensity_annotation_loader`
+        for the older 30-s Bioserenity Hypnodensity CSVs),
+        ``make_usleep_annotation_loader(channel, required=False)`` to tolerate a
+        missing U-Sleep file (yielding ``None`` instead of raising), or a no-op
+        ``lambda inst, edf_path: None`` to skip annotations entirely.
         Decoupling annotation parsing from the loader keeps this class free of
         format-specific logic.
+    usleep_channel:
+        Canonical channel name whose U-Sleep hypnodensity the *default*
+        ``annotation_loader`` loads (ignored if ``annotation_loader`` is set
+        explicitly). ``None`` (default) uses the first of :attr:`requested_channels`
+        when given, else the first key of ``alias_map`` -- i.e. it "just works" for
+        the common single-channel case (``requested_channels=[CHANNEL]``); pass this
+        explicitly whenever the default guess would pick the wrong channel (e.g.
+        loading several channels but scoring off just one of them).
     proj_factory / channel_lister / signal_reader:
         Injection points for the three LunaAPI touchpoints (see module
         docstring). Default to the ``lunapi``-backed implementations. When ``sf``
@@ -351,6 +362,7 @@ class BioserenityPSGLoader:
     rate_lookup: Optional[RateLookup] = None
     notch_freq: Optional[float] = 60.0
     annotation_loader: Optional[AnnotationLoader] = None
+    usleep_channel: Optional[str] = None
     proj_factory: Optional[ProjFactory] = None
     channel_lister: Optional[ChannelLister] = None
     signal_reader: Optional[SignalReader] = None
@@ -402,17 +414,19 @@ class BioserenityPSGLoader:
                 raise ChannelResolutionError(
                     f"requested_channels not present in alias_map: {', '.join(unknown)}"
                 )
-        # Default the annotation loader to the hypnodensity reducer so a plain
-        # loader still attaches a (timestamp, stage) hypnogram. Imported lazily;
-        # hypnodensity carries no dependency back on this module, so there is no
-        # import cycle. Only the factory is built here -- no file is read until
-        # load() invokes it.
+        # Default the annotation loader to the U-Sleep reducer so a plain loader
+        # still attaches a per-epoch stage hypnogram, keyed on usleep_channel (or
+        # the first requested/alias-map channel when unset -- see usleep_channel's
+        # docstring). Imported lazily; usleep_hypnodensity carries no dependency
+        # back on this module, so there is no import cycle. Only the factory is
+        # built here -- no file is read until load() invokes it.
         if self.annotation_loader is None:
-            from .hypnodensity import (  # noqa: PLC0415 - lazy, keeps construction cheap
-                make_hypnodensity_annotation_loader,
+            from .usleep_hypnodensity import (  # noqa: PLC0415 - lazy, keeps construction cheap
+                make_usleep_annotation_loader,
             )
 
-            self.annotation_loader = make_hypnodensity_annotation_loader()
+            channel = self.usleep_channel or self.canonical_channels[0]
+            self.annotation_loader = make_usleep_annotation_loader(channel, alias_map=self.alias_map)
 
     # ------------------------------------------------------------------ #
     # Public, pure-ish helpers
@@ -750,6 +764,34 @@ class BioserenityPSGLoader:
     def unresolved_channels(self) -> List[str]:
         """Requested canonical names that ended up without an assignment."""
         return [c for c in self.canonical_channels if c not in self._resolved]
+
+    def usleep_hypnodensity(self, channel: Optional[str] = None, **kwargs: Any) -> Tuple[np.ndarray, np.ndarray]:
+        """This loader's own raw (pre-reduction) 1-s U-Sleep hypnodensity.
+
+        Delegates to
+        :func:`~infraslow.io.usleep_hypnodensity.load_usleep_hypnodensity` for
+        :attr:`subject_id` -- the exact call the default ``annotation_loader``
+        makes internally (see :attr:`usleep_channel`) -- exposed directly so
+        callers needing the un-reduced per-second data (e.g. to illustrate the
+        1-s -> N-s reduction) don't have to duplicate the channel-resolution/
+        alias-map logic themselves. Does not require :meth:`load` to have run
+        first (only :attr:`subject_id`/:attr:`alias_map` are used).
+
+        Args:
+            channel: Canonical channel name. Defaults to :attr:`usleep_channel`,
+                then the first of :attr:`canonical_channels`.
+            **kwargs: Forwarded to :func:`load_usleep_hypnodensity` (e.g.
+                ``base_dir``, ``epoch_sec``).
+
+        Returns:
+            ``(t_hyp, probs)`` -- see :func:`load_usleep_hypnodensity`.
+        """
+        from .usleep_hypnodensity import load_usleep_hypnodensity  # noqa: PLC0415 - lazy
+
+        resolved_channel = channel or self.usleep_channel or self.canonical_channels[0]
+        return load_usleep_hypnodensity(
+            self.subject_id, resolved_channel, alias_map=self.alias_map, **kwargs
+        )
 
     @property
     def annotations(self) -> Any:

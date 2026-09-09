@@ -81,3 +81,31 @@ def test_hypnodensity_probs_at_times_nearest_neighbour():
     out = uh.hypnodensity_probs_at_times(np.array([2.4, 0.0]), t_hyp, probs)
     assert np.array_equal(out[0], [0, 0, 1, 0, 0])
     assert np.array_equal(out[1], [1, 0, 0, 0, 0])
+
+
+def test_make_usleep_annotation_loader_returns_stage_and_probs_dataframe(fake_usleep_tree):
+    loader = uh.make_usleep_annotation_loader("C3", base_dir=str(fake_usleep_tree))
+    annotations = loader(None, fake_usleep_tree / "SUBJ001" / "SUBJ001.edf")
+    assert list(annotations.columns) == ["t", "Wake", "N1", "N2", "N3", "REM", "stage"]
+    assert len(annotations) == 10  # 30 one-second rows / 3-s default epoch
+    assert np.allclose(annotations[["Wake", "N1", "N2", "N3", "REM"]].sum(axis=1), 1.0, atol=1e-5)
+    assert np.isclose(annotations["t"].iloc[0], 1.5)  # bin-centered: mean of seconds 0.5,1.5,2.5
+
+
+def test_make_usleep_annotation_loader_resolves_aliased_channel_file(fake_usleep_tree):
+    # SUBJ002 only has "EEG C3-A2.npy" on disk (see fake_usleep_tree) -- exercises the
+    # same alias-resolution path resolve_usleep_channel_path uses.
+    loader = uh.make_usleep_annotation_loader("C3", base_dir=str(fake_usleep_tree))
+    annotations = loader(None, fake_usleep_tree / "SUBJ002" / "SUBJ002.edf")
+    assert len(annotations) == 10
+
+
+def test_make_usleep_annotation_loader_missing_file_required_raises(fake_usleep_tree):
+    loader = uh.make_usleep_annotation_loader("C3", base_dir=str(fake_usleep_tree))
+    with pytest.raises(FileNotFoundError):
+        loader(None, fake_usleep_tree / "NOBODY" / "NOBODY.edf")
+
+
+def test_make_usleep_annotation_loader_missing_file_not_required_returns_none(fake_usleep_tree):
+    loader = uh.make_usleep_annotation_loader("C3", base_dir=str(fake_usleep_tree), required=False)
+    assert loader(None, fake_usleep_tree / "NOBODY" / "NOBODY.edf") is None
