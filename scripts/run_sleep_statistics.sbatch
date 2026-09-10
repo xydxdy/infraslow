@@ -8,12 +8,13 @@
 #SBATCH --cpus-per-task=3
 #SBATCH --mem=8G
 
-# Runs src/scripts/sleep_statistics.py over the same valid cohort as
-# run_preprocessing.sbatch (every subject with both an EDF and a U-Sleep
-# hypnodensity folder, via preprocessing.py's list_valid_subjects -- see
-# sleep_statistics.py's module docstring), computing YASA sleep statistics
-# straight from each subject's --channel (default C3) U-Sleep hypnodensity
-# file -- no EDF load needed -- and saving one row per subject to ${OUTPUT}.
+# Runs `src/scripts/preprocessing.py sleep-stats` over the same valid cohort
+# as run_preprocessing.sbatch (every subject with both an EDF and a U-Sleep
+# hypnodensity folder, via preprocessing.py's list_valid_subjects -- see the
+# sleep-stats section of preprocessing.py's module docstring), computing YASA
+# sleep statistics straight from each subject's --channel (default C3)
+# U-Sleep hypnodensity file -- no EDF load needed -- and saving one row per
+# subject to ${OUTPUT}.
 #
 # Single task, no job array: this only reads small per-subject U-Sleep .npy
 # files (not full EEG recordings), so it's far cheaper than
@@ -25,7 +26,7 @@
 #   sbatch --export=ALL,NUM_SHARDS=1000,SHARD_INDICES=0-9,LIMIT=50,HYPNO_EPOCH_SEC=3,OUTPUT=/scratch/users/chaisaen/usleep_dryrun/sleep_statistics.csv \
 #       run_sleep_statistics.sbatch   # dry run: same 500 subjects a
 #       # `run_preprocessing.sbatch --array=0-9 --export=ALL,NUM_SHARDS=1000,LIMIT=50,...`
-#       # job array would touch (see sleep_statistics.py's --num-shards/--shard-indices)
+#       # job array would touch (see preprocessing.py sleep-stats --num-shards/--shard-indices)
 
 set -euo pipefail
 
@@ -44,7 +45,7 @@ conda activate infraslow-py310
 cd /home/users/chaisaen/infraslow/src/scripts
 export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
-python3 sleep_statistics.py \
+python3 preprocessing.py sleep-stats \
     --output "${OUTPUT}" \
     ${LIMIT:+--limit "${LIMIT}"} \
     ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"} \

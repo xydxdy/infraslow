@@ -88,3 +88,48 @@ def test_check_usleep_file_usable_nonempty_file_returns_its_path(tmp_path: Path)
     np.save(subject_dir / "C3.npy", np.zeros((5, 5)))
     path = pp._check_usleep_file_usable("SUBJ001", "C3", str(usleep_dir))
     assert path == subject_dir / "C3.npy"
+
+
+# --------------------------------------------------------------------------- #
+# sleep-stats subcommand
+# --------------------------------------------------------------------------- #
+def test_parse_shard_indices_range():
+    assert pp._parse_shard_indices("0-9") == list(range(10))
+
+
+def test_parse_shard_indices_comma_list():
+    assert pp._parse_shard_indices("0,3,7") == [0, 3, 7]
+
+
+def test_parse_shard_indices_single():
+    assert pp._parse_shard_indices("5") == [5]
+
+
+def test_select_shard_subjects_default_matches_plain_limit():
+    subjects = [str(i) for i in range(10)]
+    assert pp._select_shard_subjects(
+        subjects, num_shards=1, shard_indices=[0], per_shard_limit=3,
+    ) == subjects[:3]
+
+
+def test_select_shard_subjects_matches_preprocessing_array_selection():
+    # subjects[i::num_shards][:per_shard_limit] unioned across shard_indices --
+    # must equal exactly what a `preprocess` job array with the same
+    # --num-shards/--limit would process across those --shard-index values.
+    subjects = [str(i) for i in range(30)]
+    got = pp._select_shard_subjects(
+        subjects, num_shards=10, shard_indices=[0, 1, 2], per_shard_limit=2,
+    )
+    expected = []
+    for shard in (0, 1, 2):
+        expected.extend(subjects[shard::10][:2])
+    assert got == expected
+    assert got == ["0", "10", "1", "11", "2", "12"]
+
+
+def test_select_shard_subjects_no_limit_takes_whole_shard():
+    subjects = [str(i) for i in range(6)]
+    got = pp._select_shard_subjects(
+        subjects, num_shards=2, shard_indices=[0], per_shard_limit=None,
+    )
+    assert got == ["0", "2", "4"]

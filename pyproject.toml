@@ -30,9 +30,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 # src-layout: make the package importable in tests without an editable install.
-# "src/scripts" is also needed because src/scripts/sleep_statistics.py does a bare
-# `from preprocessing import ...` (matching how it's actually run: `cd src/scripts &&
-# python3 sleep_statistics.py`, where the script's own directory is on sys.path) --
-# without it, `from scripts import sleep_statistics` fails to import at collection time.
-pythonpath = ["src", "src/scripts"]
+pythonpath = ["src"]
 testpaths = ["tests"]

@@ -66,7 +66,7 @@ export NUMEXPR_NUM_THREADS=1
 cd /home/users/chaisaen/infraslow/src/scripts
 export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
-python3 preprocessing.py \
+python3 preprocessing.py preprocess \
     --channels ${CHANNELS} \
     --num-shards "${NUM_SHARDS:-$SLURM_ARRAY_TASK_COUNT}" \
     --shard-index "${SLURM_ARRAY_TASK_ID}" \
