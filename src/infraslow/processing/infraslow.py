@@ -518,18 +518,22 @@ def _nearest_sample_index(t: np.ndarray, times: np.ndarray) -> np.ndarray:
     return np.where(np.abs(t[left] - times) <= np.abs(t[idx] - times), left, idx)
 
 
-def isfs_event_phase_distribution(bouts_data, *, min_events: int = DEFAULT_ISFS_MIN_EVENTS):
+def isfs_event_phase_distribution(
+    bouts_data, *, min_events: int = DEFAULT_ISFS_MIN_EVENTS, denominator: str = "in_cycle",
+):
     """Percentage distribution of event onsets across the 8 ISFS phase bins.
 
-    Matches the reference ``get_iso``'s microarousal/spindle/slow-wave/slow-wave-
+    Based on the reference ``get_iso``'s microarousal/spindle/slow-wave/slow-wave-
     spindle-coupling phase-bin analysis: usable for any one of those event types,
     one call per type. Each event is assigned to the ISFS phase bin (see
     :func:`isfs_phase_bins`) of its nearest sample -- ``0`` ("Not ISFS") if it
     falls outside a valid 25-100 s cycle. Counts are tallied across every bout
-    passed in, then each bin's count is expressed as a percentage of the **total**
-    number of events detected (the reference's own denominator -- not just the
-    events that happened to land inside a valid ISFS cycle, so the 8 percentages
-    do not necessarily sum to 100).
+    passed in, then each bin's count is expressed as a percentage of either just
+    the events landing inside a valid ISFS cycle (``denominator="in_cycle"``, the
+    default -- "Not ISFS" events are excluded from the calculation entirely, so
+    the 8 percentages sum to 100) or the **total** number of events detected
+    (``denominator="total"``, the reference's own denominator, so the 8
+    percentages do not necessarily sum to 100).
 
     Per the reference, a participant with fewer than ``min_events`` events total
     is excluded rather than reported on a near-empty denominator.
@@ -541,14 +545,21 @@ def isfs_event_phase_distribution(bouts_data, *, min_events: int = DEFAULT_ISFS_
             :func:`isfs_phase_bins` for that bout, ``event_times`` this bout's
             slice of event onset/peak times on the same time base.
         min_events: Minimum total event count required to return a result.
+        denominator: ``"in_cycle"`` (default) or ``"total"`` (matches the
+            reference) -- which count ``pct`` is expressed against.
 
     Returns:
         ``None`` if fewer than ``min_events`` events total (participant
         excluded), else a dict with ``counts`` (``(8,)`` int, per phase bin 1-8),
-        ``pct`` (``(8,)`` float, ``100 * counts / n_total``), ``n_in_isfs`` (events
-        landing in a valid cycle, i.e. ``counts.sum()``), and ``n_total`` (every
-        event across every bout passed in, the percentages' denominator).
+        ``pct`` (``(8,)`` float, ``100 * counts / n_total`` or
+        ``100 * counts / n_in_isfs`` per ``denominator``, all-NaN if that
+        denominator is zero), ``n_in_isfs`` (events landing in a valid cycle,
+        i.e. ``counts.sum()``), and ``n_total`` (every event across every bout
+        passed in).
     """
+    if denominator not in ("total", "in_cycle"):
+        raise ValueError(f"denominator must be 'total' or 'in_cycle', got {denominator!r}")
+
     counts = np.zeros(8, dtype=int)
     n_total = 0
     for t, phase_bins, event_times in bouts_data:
@@ -567,8 +578,11 @@ def isfs_event_phase_distribution(bouts_data, *, min_events: int = DEFAULT_ISFS_
     if n_total < min_events:
         return None
 
-    return dict(counts=counts, pct=100.0 * counts / n_total,
-                n_in_isfs=int(counts.sum()), n_total=n_total)
+    n_in_isfs = int(counts.sum())
+    denom = n_total if denominator == "total" else n_in_isfs
+    pct = 100.0 * counts / denom if denom > 0 else np.full(8, np.nan)
+
+    return dict(counts=counts, pct=pct, n_in_isfs=n_in_isfs, n_total=n_total)
 
 
 def isfs_phase_curve(bouts_data):

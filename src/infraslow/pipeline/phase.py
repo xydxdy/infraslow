@@ -201,14 +201,15 @@ def build_subject_continuous_phase_timeseries(
 
 def compute_subject_phase_features(
     bouts_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray]], *,
-    min_events: int = DEFAULT_ISFS_MIN_EVENTS,
+    min_events: int = DEFAULT_ISFS_MIN_EVENTS, denominator: str = "in_cycle",
 ) -> Optional[Dict[str, object]]:
     """One subject/state/channel's phase features, or `None` if fewer than
     `min_events` total events were passed in (matches
     `isfs_event_phase_distribution`'s own exclusion rule -- a subject with
     too few spindles for a meaningful phase distribution is excluded rather
-    than reported on a near-empty denominator)."""
-    dist = isfs_event_phase_distribution(bouts_data, min_events=min_events)
+    than reported on a near-empty denominator). `denominator` is forwarded
+    unchanged to `isfs_event_phase_distribution` -- see its docstring."""
+    dist = isfs_event_phase_distribution(bouts_data, min_events=min_events, denominator=denominator)
     if dist is None:
         return None
 

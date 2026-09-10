@@ -276,8 +276,11 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
 def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str, state: str, *,
                                    event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
                                    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC):
-    """This subject/state's `phase_bin_rates` (% of `event`s in each of the 8 discrete
-    ISFS phase bins), or `None` if there are no usable `event`-containing bouts."""
+    """This subject/state's `phase_bin_rates` (% of `event`s landing inside a valid
+    ISFS cycle in each of the 8 discrete phase bins -- "Not ISFS" events are
+    excluded from the denominator, see `denominator="in_cycle"` in
+    `isfs_event_phase_distribution`), or `None` if there are no usable
+    `event`-containing bouts."""
     spec = _EVENT_SPECS[event]
     subject_dir = Path(data_dir) / subject_id
     bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
@@ -293,6 +296,9 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
     event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
 
     bouts_data = pph.build_bout_phase_data(t_env, filtered, bouts, event_times)
+    # Default denominator="in_cycle": phase_bin_rates is a % of events landing
+    # inside a valid ISFS cycle (bins 1-8 only) -- "Not ISFS" events are
+    # excluded from the denominator entirely.
     return pph.compute_subject_phase_features(bouts_data)
 
 
@@ -393,7 +399,10 @@ def _process_subject(
                                                     hypno_epoch_sec=hypno_epoch_sec)
         except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
             feats = None
-        if feats is None or sum(feats["phase_bin_rates"]) <= 0:
+        # n_in_isfs (not sum(phase_bin_rates), which is all-NaN whenever no event
+        # landed in a valid cycle under denominator="in_cycle"'s zero-division guard)
+        # is the denominator-agnostic "no usable phase-binned events" signal.
+        if feats is None or feats["n_in_isfs"] <= 0:
             continue
         rates[state] = np.asarray(feats["phase_bin_rates"])
 
@@ -526,7 +535,7 @@ def build_state_figure(
     ax_bottom.set(xlim=(center - np.pi, center + np.pi),
                   xticks=list(tick_phases),
                   xticklabels=[_phase_tick_label(t) for t in tick_phases],
-                  xlabel="ISFS phase (rad)", ylabel=f"% of {event_label} (of total detected)")
+                  xlabel="ISFS phase (rad)", ylabel=f"% of {event_label} (in a valid ISFS cycle)")
     ax_bottom.set_title(f"B) {event_label.capitalize()} distribution across ISFS phase "
                          f"(n={n_complete} subjects)", fontsize=12, fontweight="bold")
     ax_bottom.tick_params(labelsize=10)
