@@ -6,8 +6,6 @@
   density and extract ISFS (infraslow frequency) features from bouts.
 * :mod:`~infraslow.pipeline.phase` — infraslow phase analysis and
   phase-locked coupling estimates.
-* :mod:`~infraslow.pipeline.transitions` — filter bouts down to their
-  pre-real-stage-transition tail.
 * :mod:`~infraslow.pipeline.features` — aggregate features across
   subjects and sleep stages for statistical analysis.
 
