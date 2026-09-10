@@ -6,8 +6,6 @@
   density and extract ISFS (infraslow frequency) features from bouts.
 * :mod:`~infraslow.pipeline.phase` — infraslow phase analysis and
   phase-locked coupling estimates.
-* :mod:`~infraslow.pipeline.features` — aggregate features across
-  subjects and sleep stages for statistical analysis.
 
 Preprocessed data (envelopes, temporal_ISFS, stage bouts, spindle/SW
 detections) lives under each subject's directory tree created by

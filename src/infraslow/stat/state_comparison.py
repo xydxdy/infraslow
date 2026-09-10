@@ -2,7 +2,7 @@
 per-subject/state records.
 
 Every function here operates on already-computed values (subject-level ISFS
-spectrum/phase features from `infraslow.pipeline.pipeline.find_paired_subject_data`,
+spectrum/phase features already paired up by subject across N2/N3,
 or arrays built from them) -- no signal processing, spindle/slow-wave detection, or
 spectral fitting happens here; that is entirely `infraslow.pipeline`'s and
 `infraslow.processing.infraslow`'s job. Because N2 and N3 measurements come from the
@@ -123,8 +123,7 @@ def compare_phase_bins(
     """Paired t-test per ISFS phase bin, across subjects, BH-FDR corrected across bins.
 
     `n2_rates`/`n3_rates` are `(n_subjects, n_bins)` -- one subject's `phase_bin_rates`
-    per row, same subject order in both (as produced by
-    `infraslow.pipeline.pipeline.find_paired_subject_data`). `bin_centers` (length
+    per row, same subject order in both. `bin_centers` (length
     `n_bins`) is each bin's phase angle, e.g.
     `infraslow.pipeline.phase.bin_center_angle(np.arange(1, n_bins + 1))`.
 
@@ -204,8 +203,7 @@ def compare_isfs_metrics(
 def circular_mean_and_resultant(angles: np.ndarray) -> Tuple[float, float]:
     """Circular mean angle (radians, in `(-pi, pi]`) and mean resultant length
     (`0`-`1`) of `angles`, ignoring NaNs -- the same mean-resultant-vector formula
-    `infraslow.pipeline.phase.compute_subject_phase_features` and
-    `infraslow.pipeline.pipeline.run_pipeline`'s cohort circular mean use,
+    `infraslow.pipeline.phase.compute_subject_phase_features` uses,
     generalized to any array of angles (e.g. one subject-level `mean_phase` per
     subject, as a *supplemental* preferred-phase comparison -- distinct from
     `compare_phase_bins`'s ordinary paired t-tests on bin rates). `(nan, nan)` if no

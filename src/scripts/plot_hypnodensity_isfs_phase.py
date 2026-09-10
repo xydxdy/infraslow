@@ -145,12 +145,8 @@ ORANGE, LORANGE = "#d2691e", "#f2c14e"
 # above, so kept as its own pair rather than reused).
 CORR_POS, CORR_NEG, CORR_NEUTRAL = "#2a78d6", "#e34948", "#9a9a95"
 
-# Mirrors infraslow.pipeline.pipeline._EVENT_SPECS's "spindle"/"sw" artifact-pathway
-# switch (band + bouts key + bouts loader + summary loader + peak column) -- duplicated
-# here rather than importing infraslow.pipeline.pipeline, since that module transitively
-# imports infraslow.pipeline.figures, which calls matplotlib.use("Agg") at import time
-# (harmless here since this script sets the same backend itself, but kept independent
-# to match the notebook this was converted from).
+# "spindle"/"sw" artifact-pathway switch (band + bouts key + bouts loader + summary
+# loader + peak column) -- this script's own scan.
 _EVENT_SPECS = {
     "spindle": dict(band="sigma", bouts_key="spindle", event_label="spindles",
                      load_bouts=pio.load_stage_bouts, load_summary=pio.load_spindle_summary,
