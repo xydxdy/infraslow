@@ -25,10 +25,11 @@ using each channel's own U-Sleep hypnodensity (not a shared subject-wide
 Bioserenity hypnogram) to find N2/N3 bouts and restrict spindle/slow-wave
 detection -- see the ``usleep/<N>s/`` artifacts below.
 
-Saved layout (one ``<output-dir>/data/<subject>/<channel>/`` tree per
-subject/channel; shard/progress logs go under ``<output-dir>/logs/``)::
+Saved layout (one ``<output-dir>/<N>s/data/<subject>/<channel>/`` tree per
+subject/channel, ``N`` = ``--hypno-epoch-sec`` -- see :func:`_epoch_root`;
+shard/progress logs go under ``<output-dir>/logs/``, not epoch-scoped)::
 
-    data/<subject>/<channel>/
+    <N>s/data/<subject>/<channel>/
         usleep/
             <N>s/                  # N = --hypno-epoch-sec, default 3
                 argmax.npy         # (m,) str stage labels, <N>-s epochs
@@ -68,16 +69,45 @@ only saved once per ``envelope``/``temporal_ISFS`` file (not per bout): it is
 fully reconstructable from a bout's own ``(start, stop)`` in ``spindle_bouts.npz``
 plus ``SF_ENV``, so storing it per bout would just be duplicate data.
 
-Two subcommands, run via Slurm, not the login node, from this file's own
-directory (``src/scripts/``) with ``src/`` on ``PYTHONPATH`` so ``infraslow``
-resolves (the package is not pip-installed):
+Run via Slurm, not the login node, from this file's own directory
+(``src/scripts/``) with ``src/`` on ``PYTHONPATH`` so ``infraslow`` resolves
+(the package is not pip-installed): the per-subject/channel artifact tree
+described above, plus two CSVs per ``--channels`` entry per invocation, both
+keyed the same way and living alongside ``data/`` under the same
+``<output-dir>/<N>s/`` root (see :func:`_epoch_root`) --
+``<output-dir>/<N>s/events_<channel>.csv``/``sleep_stats_<channel>.csv`` for
+a ``--subject`` run, ``..._<channel>_shard<N>.csv`` for a sharded run
+(mirrors ``progress.log``/``progress_shard<N>.log``'s naming so concurrent
+shards, and concurrent channels within a shard, never share a file; see
+:func:`_events_path`/:func:`_sleep_stats_path`):
 
-``preprocess`` -- the per-subject/channel artifact tree described above.
+* ``events_<channel>.csv`` -- columns ``id`` and, for every ``--stages``
+  entry, ``<stage>_Spindle`` and ``<stage>_SW`` (the total number of
+  spindles/slow waves YASA detected across that stage's bouts --
+  ``spindle_yasa.csv``/``sw_yasa.csv``'s row count, not the number of bouts
+  containing one -- see :func:`preprocess_channel`'s return value).
+* ``sleep_stats_<channel>.csv`` -- columns ``id`` and every ``yasa.
+  sleep_statistics()`` key (:data:`SLEEP_STATS_KEYS`; TIB, SPT, WASO, TST, N1,
+  N2, N3, REM, NREM, SOL, Lat_N1, Lat_N2, Lat_N3, Lat_REM, %N1, %N2, %N3,
+  %REM, %NREM, SE, SME), computed from the same reduced hypnogram
+  :func:`preprocess_channel` uses for bout-finding -- always produced
+  alongside the rest of preprocessing, in the same run.
+
+A cell is blank (not a guessed ``0``) if that channel raised outright for
+this subject -- see :func:`preprocess_subject`. Each file is rewritten from
+scratch at the start of its shard's run (so resubmitting a shard never
+duplicates rows) and appended to one subject at a time as the run progresses
+(so a killed/timed-out job keeps every subject it finished before that
+point, not just the ones from a final batch write). Merge each channel's
+per-shard CSVs together yourself once every shard has finished (plain
+concatenation -- ``pandas.concat``/``cat`` all ``events_<channel>_shard*.csv``
+into one ``events_<channel>.csv``, same for ``sleep_stats_<channel>``; no
+subject id repeats across shards, since shards partition the cohort).
 Single-subject dry run::
 
     export PYTHONPATH=/home/users/chaisaen/infraslow/src
     srun -p normal --time=00:30:00 --mem=8G --cpus-per-task=1 \\
-        python3 preprocessing.py preprocess --subject 318679 --channels C3 \\
+        python3 preprocessing.py --subject 318679 --channels C3 \\
             --output-dir $SCRATCH/processed_data
 
 Whole cohort, split across a job array (``--num-shards``/``--shard-index``
@@ -85,44 +115,14 @@ default from ``$SLURM_ARRAY_TASK_COUNT``/``$SLURM_ARRAY_TASK_ID`` when a
 ``--subject`` is not given -- see ``run_preprocessing.sbatch``)::
 
     sbatch --array=0-999 run_preprocessing.sbatch
-
-``sleep-stats`` -- per-subject YASA sleep statistics for every valid subject
-(one row per subject id), for the same cohort ``preprocess`` would touch (via
-:func:`list_valid_subjects`, so this subcommand's cohort always matches
-``preprocess``'s instead of drifting from whatever happens to be sitting in
-an output directory). Only the hypnogram is needed to compute sleep
-statistics, so this reads each subject's ``--channel`` U-Sleep hypnodensity
-directly (:func:`~infraslow.io.usleep_hypnodensity.load_usleep_hypnodensity`,
-reduced to ``--hypno-epoch-sec``-wide epochs the same way ``preprocess`` does)
-instead of loading the subject's EDF through ``BioserenityPSGLoader`` -- far
-cheaper, since it skips opening 100k+ EEG recordings just to read their
-attached hypnogram. U-Sleep hypnodensity is scored per-channel (channels can
-disagree), so this reports one channel's statistics per subject, not a
-subject-wide average across channels -- pick a different ``--channel`` to
-compare. Saves one CSV to ``--output`` with columns ``[id, <yasa.
-sleep_statistics() keys>]`` (TIB, SPT, WASO, TST, N1, N2, N3, REM, NREM, SOL,
-Lat_N1, Lat_N2, Lat_N3, Lat_REM, %N1, %N2, %N3, %REM, %NREM, SE, SME -- see
-``yasa.sleep_statistics``'s docstring for definitions). A subject with a
-missing/empty/corrupt U-Sleep hypnodensity file for ``--channel`` is logged
-and skipped, not fatal to the run. Subjects are farmed out across
-``--workers`` processes (default: ``$SLURM_CPUS_PER_TASK``, else 1) via
-``ProcessPoolExecutor`` -- each subject's CSV read + ``yasa.
-sleep_statistics`` call is independent, so this scales close to linearly with
-CPU count::
-
-    python3 preprocessing.py sleep-stats \\
-        --output /scratch/users/chaisaen/processed_data/sleep_statistics.csv
-
-See ``run_sleep_statistics.sbatch`` to submit that as a Slurm job.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
-import traceback
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -153,7 +153,7 @@ from infraslow.io.metadata import (
     combine_bioserenity_metadata,
     load_bioserenity_metadata,
 )
-from infraslow.io.utils import list_dir_filenames, progress_iter
+from infraslow.io.utils import list_dir_filenames
 from infraslow.io import usleep_hypnodensity as uh
 from infraslow.pipeline import io as pio
 from infraslow.processing.infraslow import eeg_envelope, infraslow_spectrum, isfs_lowpass
@@ -181,6 +181,16 @@ STAGE_CODES: Dict[str, Tuple[int, ...]] = {"N2": (2,), "N3": (3,)}
 DEFAULT_STAGES: Tuple[str, ...] = ("N2", "N3")
 DEFAULT_CHANNELS: Tuple[str, ...] = DEFAULT_EEG_CHANNELS
 
+# yasa.sleep_statistics()'s return dict is a fixed schema given the fixed
+# Wake/N1/N2/N3/REM stage set in DEFAULT_STAGE_MAP -- fixed here too so the
+# preprocess subcommand's sleep_stats_<channel>.csv header can be written up
+# front, before any subject is processed (see main_preprocess).
+SLEEP_STATS_KEYS: Tuple[str, ...] = (
+    "TIB", "SPT", "WASO", "TST", "N1", "N2", "N3", "REM", "NREM", "SOL",
+    "Lat_N1", "Lat_N2", "Lat_N3", "Lat_REM",
+    "%N1", "%N2", "%N3", "%REM", "%NREM", "SE", "SME",
+)
+
 # Subdirectories of --output-dir: per-subject trees under DATA_DIRNAME, shard/
 # progress logs under LOGS_DIRNAME -- kept apart so a directory listing of one
 # never has to skip over 100k+ entries of the other.
@@ -206,11 +216,8 @@ def _env_str(name: str, default: str) -> str:
     return default if val is None else val
 
 
-def _add_preprocess_subparser(subparsers) -> None:
-    p = subparsers.add_parser(
-        "preprocess", help="Per-subject/channel envelope/ISFS/bout artifact tree.",
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--subject", default=os.environ.get("SUBJECT"),
                     help="Process only this one subject id / EDF stem (env: SUBJECT). "
                          "If omitted, every valid subject (has both an EDF and a "
@@ -257,62 +264,6 @@ def _add_preprocess_subparser(subparsers) -> None:
                     default=Path(os.path.expandvars(
                         _env_str("OUTPUT_DIR", "$SCRATCH/infraslow_outputs/preprocessed"))),
                     help="Root output directory, one subfolder per subject (env: OUTPUT_DIR)")
-
-
-def _add_sleep_stats_subparser(subparsers) -> None:
-    p = subparsers.add_parser(
-        "sleep-stats", help="Per-subject YASA sleep statistics CSV, one row per subject.",
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument("--metadata", default=DEFAULT_METADATA, help="Primary metadata CSV path.")
-    p.add_argument("--metadata2", default=DEFAULT_METADATA2,
-                    help="Second metadata CSV path, combined with --metadata by ID.")
-    p.add_argument("--edf-dir", default=DEFAULT_EDF_DIR, help="Directory of {id}.edf files.")
-    p.add_argument("--usleep-dir", default=os.path.expandvars(
-                        _env_str("USLEEP_DIR", DEFAULT_USLEEP_HYPNODENSITY_DIR)),
-                    help="U-Sleep hypnodensity directory, one subfolder per subject "
-                         "(env: USLEEP_DIR)")
-    p.add_argument("--channel", default=_env_str("CHANNEL", "C3"),
-                    help="EEG channel whose U-Sleep hypnodensity to use -- statistics are "
-                         "per-channel, not a subject-wide average (env: CHANNEL)")
-    p.add_argument("--hypno-epoch-sec", type=float,
-                    default=float(_env_str("HYPNO_EPOCH_SEC", str(HYPNO_EPOCH_SEC))),
-                    help="Width (s) of the epoch the native 1-s U-Sleep hypnodensity is "
-                         "averaged into before computing statistics; sets "
-                         "yasa.sleep_statistics's sf_hyp (1/hypno_epoch_sec) (env: HYPNO_EPOCH_SEC)")
-    p.add_argument(
-        "--output", type=Path,
-        default=Path(os.path.expandvars(
-            _env_str("OUTPUT", "/scratch/users/chaisaen/processed_data/sleep_statistics.csv"))),
-        help="Output CSV path (env: OUTPUT).",
-    )
-    p.add_argument("--num-shards", type=int, default=1,
-                    help="Split the valid-subject list into this many pieces, matching "
-                         "the preprocess subcommand's --num-shards convention -- use with "
-                         "--shard-indices to reproduce the exact subject set a "
-                         "preprocess job array touched. Default 1 (no sharding).")
-    p.add_argument("--shard-indices", default="0",
-                    help="Which shard(s) to include: an inclusive range ('0-9') or a "
-                         "comma-separated list ('0,3,7'). Each shard i contributes "
-                         "subjects[i::num_shards], --limit applied per shard -- same "
-                         "per-shard semantics as the preprocess subcommand's --limit. "
-                         "Default '0' (with the default --num-shards=1, this is the "
-                         "whole list, unchanged from --limit alone).")
-    p.add_argument("--limit", type=int, default=None,
-                    help="Process at most this many subjects per shard (quick tests).")
-    p.add_argument(
-        "--workers", type=int,
-        default=int(_env_str("WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "1"))),
-        help="Parallel worker processes (env: WORKERS, falls back to "
-             "$SLURM_CPUS_PER_TASK, else 1).",
-    )
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = p.add_subparsers(dest="command", required=True)
-    _add_preprocess_subparser(subparsers)
-    _add_sleep_stats_subparser(subparsers)
     return p.parse_args()
 
 
@@ -587,7 +538,7 @@ def preprocess_channel(
     sf_env: float = SF_ENV, hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
     align_tolerance_sec: float = DEFAULT_USLEEP_ALIGN_TOLERANCE_SEC,
-) -> None:
+) -> Tuple[Dict[str, Dict[str, int]], Dict[str, float]]:
     """Compute and save every artifact for one subject/channel (see module docstring).
 
     The hypnogram used for bout-finding and to restrict spindle/slow-wave
@@ -595,6 +546,16 @@ def preprocess_channel(
     native 1-s resolution to ``hypno_epoch_sec``-wide epochs -- not a
     subject-wide Bioserenity hypnogram (U-Sleep hypnodensity is scored
     per-channel; see ``infraslow.io.usleep_hypnodensity``'s module docstring).
+    ``yasa.sleep_statistics`` is computed from that same reduced hypnogram
+    instead of loading the U-Sleep file a second time.
+
+    Returns:
+        ``({stage: {"spindle": int, "sw": int}}, sleep_stats)`` -- the first
+        for :func:`main_preprocess`'s ``events_<channel>.csv`` (one entry per
+        ``stages``: the total number of spindles/slow waves YASA detected in
+        that stage's bouts -- ``spindle_yasa.csv``/``sw_yasa.csv``'s row
+        count, not the number of bouts containing one), the second (``yasa.
+        sleep_statistics()``'s return dict) for its ``sleep_stats_<channel>.csv``.
     """
     ch_dir = output_dir / DATA_DIRNAME / subject_id / channel
     (ch_dir / "envelope").mkdir(parents=True, exist_ok=True)
@@ -617,6 +578,7 @@ def preprocess_channel(
     save_usleep_hypnogram(ch_dir, stage_epoch, probs_epoch, hypno_epoch_sec=hypno_epoch_sec)
 
     hypnogram = _stages_to_int(stage_epoch, DEFAULT_STAGE_MAP)
+    sleep_stats = yasa.sleep_statistics(hypnogram, sf_hyp=1.0 / hypno_epoch_sec)
     # BioserenityPSGLoader.annotations has no public setter (read-only property
     # over the ``_annotations`` field); U-Sleep hypnodensity is scored
     # per-channel, so each channel's own reduced hypnogram must override the
@@ -632,6 +594,7 @@ def preprocess_channel(
     for name, (t_env, filtered) in temporal_isfs.items():
         _save_timeseries(ch_dir / "temporal_ISFS" / f"{name}.npz", t_env, filtered)
 
+    stage_events: Dict[str, Dict[str, int]] = {}
     for stage in stages:
         # Nested under <N>s/ (N = hypno_epoch_sec), mirroring usleep/<N>s/ above --
         # every artifact saved below is restricted by that epoch's hypnogram, so a
@@ -674,6 +637,10 @@ def preprocess_channel(
             )
             _save_spectra(stage_dir / "ISFS" / f"{name}.npz", freqs, psds, bout_start)
 
+        stage_events[stage] = dict(spindle=len(spindle_summary), sw=len(sw_summary))
+
+    return stage_events, sleep_stats
+
 
 # --------------------------------------------------------------------------- #
 # Per-subject entry point
@@ -687,33 +654,130 @@ def preprocess_subject(
     stage_codes: Mapping[str, Tuple[int, ...]] = STAGE_CODES,
     hypno_epoch_sec: float = HYPNO_EPOCH_SEC,
     min_bout_sec: float = MIN_BOUT_SEC, window_sec: float = WINDOW_SEC,
-) -> None:
+) -> Tuple[Dict[str, Dict[str, Dict[str, int]]], Dict[str, Dict[str, float]]]:
     """Load one subject once and preprocess every requested channel.
 
     No subject-wide hypnogram is loaded here: the Bioserenity Hypnodensity CSV
     is never read (``annotation_loader`` is a no-op below) -- each channel
     sources, and saves, its own hypnogram from its own U-Sleep hypnodensity
-    file inside :func:`preprocess_channel`.
+    file inside :func:`preprocess_channel`, which also computes that
+    channel's ``yasa.sleep_statistics`` from it -- sleep statistics are
+    therefore always produced alongside the rest of preprocessing, in the
+    same pass, not via a separate command.
+
+    Returns:
+        ``({channel: {stage: {"spindle": int, "sw": int}}}, {channel:
+        sleep_stats})`` for every channel that completed without raising -- a
+        channel that raised is simply absent from both (see
+        :func:`main_preprocess`'s ``events_<channel>.csv``/
+        ``sleep_stats_<channel>.csv``, which leave that channel's row blank
+        for this subject rather than guessing).
     """
     loader = BioserenityPSGLoader(
         subject_id=subject_id, sf=sf, requested_channels=list(channels),
         annotation_loader=lambda inst, edf_path: None,
     ).load()
 
+    events: Dict[str, Dict[str, Dict[str, int]]] = {}
+    sleep_stats: Dict[str, Dict[str, float]] = {}
     for ch in channels:
         try:
-            preprocess_channel(
+            events[ch], sleep_stats[ch] = preprocess_channel(
                 loader, subject_id, ch, output_dir,
                 usleep_dir=usleep_dir, bands=bands, stages=stages, stage_codes=stage_codes,
                 hypno_epoch_sec=hypno_epoch_sec, min_bout_sec=min_bout_sec, window_sec=window_sec,
             )
         except Exception:  # noqa: BLE001 - one bad channel must not sink the others
             logger.exception("Channel %s failed for subject %s", ch, subject_id)
+    return events, sleep_stats
+
+
+def _event_fieldnames(stages: Sequence[str]) -> List[str]:
+    """One channel's events CSV header: ``id`` then ``<stage>_{Spindle,SW}``
+    for every requested stage, in that order. The channel itself lives in the
+    file's name (see :func:`_events_path`), not in these columns."""
+    fields = ["id"]
+    for stage in stages:
+        fields.append(f"{stage}_Spindle")
+        fields.append(f"{stage}_SW")
+    return fields
+
+
+def _event_row(
+    subject_id: str, channel_events: Optional[Mapping[str, Mapping[str, int]]], *,
+    stages: Sequence[str],
+) -> Dict[str, object]:
+    """One row of one channel's events CSV, from that channel's entry in
+    :func:`preprocess_subject`'s return value (``None`` if the channel raised
+    outright for this subject). ``None`` (blank in the CSV) for a stage that
+    isn't in ``channel_events``, never a guessed ``0``."""
+    row: Dict[str, object] = {"id": subject_id}
+    for stage in stages:
+        stage_events = channel_events.get(stage) if channel_events else None
+        row[f"{stage}_Spindle"] = stage_events["spindle"] if stage_events else None
+        row[f"{stage}_SW"] = stage_events["sw"] if stage_events else None
+    return row
+
+
+def _epoch_root(output_dir: Path, hypno_epoch_sec: float) -> Path:
+    """``<output-dir>/<N>s/`` -- the root every preprocess artifact (the
+    ``data/`` tree, ``events_<channel>*.csv``, ``sleep_stats_<channel>*.csv``)
+    is saved under for a given ``--hypno-epoch-sec`` (reusing
+    :func:`infraslow.pipeline.io.epoch_dirname`'s ``<N>s`` formatting), so
+    rerunning against the same ``--output-dir`` with a different epoch width
+    adds a sibling tree instead of overwriting this one."""
+    return output_dir / pio.epoch_dirname(hypno_epoch_sec)
+
+
+def _events_path(output_dir: Path, channel: str, *, shard_index: Optional[int]) -> Path:
+    """One channel's events CSV path -- ``events_<channel>.csv`` for a
+    ``--subject`` run, ``events_<channel>_shard<N>.csv`` for a sharded run
+    (mirrors ``progress.log``/``progress_shard<N>.log``'s naming so concurrent
+    shards, and concurrent channels within a shard, never share a file)."""
+    if shard_index is None:
+        return output_dir / f"events_{channel}.csv"
+    return output_dir / f"events_{channel}_shard{shard_index}.csv"
+
+
+def _sleep_stats_fieldnames() -> List[str]:
+    """One channel's sleep-stats CSV header: ``id`` then every
+    :data:`SLEEP_STATS_KEYS` entry, in that order."""
+    return ["id", *SLEEP_STATS_KEYS]
+
+
+def _sleep_stats_row(
+    subject_id: str, channel_stats: Optional[Mapping[str, float]],
+) -> Dict[str, object]:
+    """One row of one channel's sleep-stats CSV, from that channel's entry in
+    :func:`preprocess_subject`'s sleep-stats return value (``None`` if the
+    channel raised outright for this subject). ``None`` (blank in the CSV)
+    for every column in that case, never a guessed ``0``."""
+    row: Dict[str, object] = {"id": subject_id}
+    for key in SLEEP_STATS_KEYS:
+        row[key] = channel_stats[key] if channel_stats else None
+    return row
+
+
+def _sleep_stats_path(output_dir: Path, channel: str, *, shard_index: Optional[int]) -> Path:
+    """One channel's sleep-stats CSV path -- ``sleep_stats_<channel>.csv`` for
+    a ``--subject`` run, ``sleep_stats_<channel>_shard<N>.csv`` for a sharded
+    run (mirrors :func:`_events_path`'s naming)."""
+    if shard_index is None:
+        return output_dir / f"sleep_stats_{channel}.csv"
+    return output_dir / f"sleep_stats_{channel}_shard{shard_index}.csv"
 
 
 def main_preprocess(args: argparse.Namespace) -> None:
     _validate_hypno_epoch_sec(args.hypno_epoch_sec, args.sf)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # data/, events_<channel>*.csv and sleep_stats_<channel>*.csv all nest
+    # under <output-dir>/<N>s/ (see _epoch_root) -- every one of them is
+    # restricted by that epoch's hypnogram, so a rerun with a different
+    # --hypno-epoch-sec against the same --output-dir adds a sibling <N>s/
+    # tree instead of overwriting this one.
+    epoch_root = _epoch_root(args.output_dir, args.hypno_epoch_sec)
+    epoch_root.mkdir(parents=True, exist_ok=True)
 
     # Shard resolution happens before logging setup so each shard gets its own
     # log file -- a thousand array tasks all appending to one shared
@@ -721,6 +785,7 @@ def main_preprocess(args: argparse.Namespace) -> None:
     logs_dir = args.output_dir / LOGS_DIRNAME
     if args.subject:
         log_path = logs_dir / "progress.log"
+        shard_index = None
     else:
         num_shards, shard_index = resolve_shard(args.num_shards, args.shard_index)
         log_path = logs_dir / f"progress_shard{shard_index}.log"
@@ -747,138 +812,58 @@ def main_preprocess(args: argparse.Namespace) -> None:
         logger.info(f"shard {shard_index}/{num_shards}: {len(subjects)} subject(s)")
 
     logger.info(f"channels={args.channels} stages={args.stages} sf={args.sf} "
-                f"hypno_epoch_sec={args.hypno_epoch_sec} output_dir={args.output_dir}")
+                f"hypno_epoch_sec={args.hypno_epoch_sec} epoch_root={epoch_root}")
+
+    # One events CSV and one sleep-stats CSV per channel (see _events_path/
+    # _sleep_stats_path) -- each rewritten from scratch here (never appended
+    # to a stale file left by a prior run of this same shard), then appended
+    # to one subject at a time below so a killed/timed-out job keeps every
+    # subject it finished so far. Sleep stats reuse the hypnogram
+    # preprocess_channel already loaded, so no extra U-Sleep file read --
+    # merge each channel's per-shard CSVs together yourself, same as
+    # events_<channel>_shard<N>.csv.
+    event_fields = _event_fieldnames(args.stages)
+    events_paths = {ch: _events_path(epoch_root, ch, shard_index=shard_index) for ch in args.channels}
+    for events_path in events_paths.values():
+        with events_path.open("w", newline="") as f:
+            csv.DictWriter(f, fieldnames=event_fields).writeheader()
+
+    sleep_stats_fields = _sleep_stats_fieldnames()
+    sleep_stats_paths = {
+        ch: _sleep_stats_path(epoch_root, ch, shard_index=shard_index) for ch in args.channels
+    }
+    for sleep_stats_path in sleep_stats_paths.values():
+        with sleep_stats_path.open("w", newline="") as f:
+            csv.DictWriter(f, fieldnames=sleep_stats_fields).writeheader()
 
     for subject_id in subjects:
         try:
-            preprocess_subject(
-                subject_id, args.output_dir, sf=args.sf, channels=args.channels,
+            events, sleep_stats = preprocess_subject(
+                subject_id, epoch_root, sf=args.sf, channels=args.channels,
                 usleep_dir=args.usleep_dir, stages=args.stages, hypno_epoch_sec=args.hypno_epoch_sec,
                 min_bout_sec=args.min_bout_sec, window_sec=args.window_sec,
             )
-            logger.info(f"done: subject={subject_id} -> {args.output_dir / DATA_DIRNAME / subject_id}")
+            for ch, events_path in events_paths.items():
+                row = _event_row(subject_id, events.get(ch), stages=args.stages)
+                with events_path.open("a", newline="") as f:
+                    csv.DictWriter(f, fieldnames=event_fields).writerow(row)
+            for ch, sleep_stats_path in sleep_stats_paths.items():
+                row = _sleep_stats_row(subject_id, sleep_stats.get(ch))
+                with sleep_stats_path.open("a", newline="") as f:
+                    csv.DictWriter(f, fieldnames=sleep_stats_fields).writerow(row)
+            logger.info(f"done: subject={subject_id} -> {epoch_root / DATA_DIRNAME / subject_id}")
         except Exception:  # noqa: BLE001 - one bad subject must not sink the shard
             logger.exception(f"Subject {subject_id} failed")
 
-    logger.info(f"finished: {len(subjects)} subject(s) attempted")
-
-
-# --------------------------------------------------------------------------- #
-# sleep-stats subcommand
-# --------------------------------------------------------------------------- #
-def _parse_shard_indices(spec: str) -> List[int]:
-    """Parse a ``--shard-indices`` spec into a sorted list of ints: an inclusive
-    range (``"0-9"`` -> ``[0, 1, ..., 9]``) or a comma-separated list
-    (``"0,3,7"`` -> ``[0, 3, 7]``); a bare number (``"5"``) is a single shard."""
-    spec = spec.strip()
-    if "-" in spec and "," not in spec:
-        lo, hi = spec.split("-", 1)
-        return list(range(int(lo), int(hi) + 1))
-    return sorted(int(part) for part in spec.split(","))
-
-
-def _select_shard_subjects(
-    subjects: Sequence[str], *, num_shards: int, shard_indices: Sequence[int],
-    per_shard_limit: Optional[int],
-) -> List[str]:
-    """Union, in ``shard_indices`` order, of ``subjects[i::num_shards][:per_shard_limit]``
-    for each shard ``i`` -- replicates exactly what a ``preprocess`` job array with
-    the same ``--num-shards``/``--limit`` selects across those shard indices, so a
-    single-task ``sleep-stats`` run can be pointed at the identical subject
-    set. With the defaults (``num_shards=1``, ``shard_indices=[0]``), this reduces to
-    plain ``subjects[:per_shard_limit]`` -- unchanged from ``--limit`` alone."""
-    selected: List[str] = []
-    for shard in shard_indices:
-        shard_subjects = list(subjects[shard::num_shards])
-        if per_shard_limit:
-            shard_subjects = shard_subjects[:per_shard_limit]
-        selected.extend(shard_subjects)
-    return selected
-
-
-def compute_subject_stats(
-    subject_id: str, usleep_dir: str, channel: str, *, hypno_epoch_sec: float,
-) -> Dict[str, float]:
-    """One subject's ``yasa.sleep_statistics`` dict, sourced from ``channel``'s own
-    U-Sleep hypnodensity, reduced from its native 1-s resolution to
-    ``hypno_epoch_sec``-wide epochs (matching the ``preprocess`` subcommand's
-    convention)."""
-    _check_usleep_file_usable(subject_id, channel, usleep_dir)
-    t_hyp, probs = uh.load_usleep_hypnodensity(subject_id, channel, base_dir=usleep_dir)
-    _t_epoch, _probs_epoch, stage_epoch = uh.hypnodensity_to_epoch_hypnogram(
-        t_hyp, probs, epoch_sec=hypno_epoch_sec, src_epoch_sec=DEFAULT_USLEEP_EPOCH_SEC,
+    logger.info(
+        f"finished: {len(subjects)} subject(s) attempted -> "
+        f"{sorted(events_paths.values())} {sorted(sleep_stats_paths.values())}"
     )
-    hypno_int = _stages_to_int(stage_epoch, DEFAULT_STAGE_MAP)
-    return yasa.sleep_statistics(hypno_int, sf_hyp=1.0 / hypno_epoch_sec)
-
-
-def _compute_or_error(
-    args: Tuple[str, str, str, float],
-) -> Tuple[str, Optional[Dict[str, float]], Optional[str]]:
-    """``ProcessPoolExecutor``-friendly wrapper: exceptions can't cross the
-    process boundary as live objects, so catch here and ship back the
-    formatted traceback text instead for the parent to log.
-    """
-    subject_id, usleep_dir, channel, hypno_epoch_sec = args
-    try:
-        stats = compute_subject_stats(
-            subject_id, usleep_dir, channel, hypno_epoch_sec=hypno_epoch_sec,
-        )
-        return subject_id, stats, None
-    except Exception:  # noqa: BLE001 - one bad subject must not sink the run
-        return subject_id, None, traceback.format_exc()
-
-
-def main_sleep_statistics(args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    subjects = list_valid_subjects(args.metadata, args.metadata2, args.edf_dir, args.usleep_dir)
-    shard_indices = _parse_shard_indices(args.shard_indices)
-    subjects = _select_shard_subjects(
-        subjects, num_shards=args.num_shards, shard_indices=shard_indices,
-        per_shard_limit=args.limit,
-    )
-    workers = max(1, args.workers)
-    logger.info(f"{len(subjects)} valid subject(s) (num_shards={args.num_shards} "
-                f"shard_indices={shard_indices} limit={args.limit}); channel={args.channel} "
-                f"hypno_epoch_sec={args.hypno_epoch_sec} workers={workers}")
-
-    tasks = [
-        (subject_id, args.usleep_dir, args.channel, args.hypno_epoch_sec)
-        for subject_id in subjects
-    ]
-    # Each task is one small .npy read + a cheap yasa call, so a large chunksize
-    # keeps IPC overhead from dominating over ~170k subjects.
-    chunksize = max(1, len(tasks) // (workers * 20)) if tasks else 1
-
-    rows: List[Dict[str, object]] = []
-    n_failed = 0
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        results = pool.map(_compute_or_error, tasks, chunksize=chunksize)
-        for subject_id, stats, error in progress_iter(
-            results, len(tasks), enabled=True, desc="sleep_statistics",
-        ):
-            if error is not None:
-                logger.error(f"Subject {subject_id} failed:\n{error}")
-                n_failed += 1
-                continue
-            rows.append({"id": subject_id, **stats})
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(args.output, index=False)
-    logger.info(f"wrote {len(rows)} subject(s) ({n_failed} failed) -> {args.output}")
 
 
 def main() -> None:
     args = parse_args()
-    if args.command == "preprocess":
-        main_preprocess(args)
-    else:
-        main_sleep_statistics(args)
+    main_preprocess(args)
 
 
 if __name__ == "__main__":

@@ -91,45 +91,107 @@ def test_check_usleep_file_usable_nonempty_file_returns_its_path(tmp_path: Path)
 
 
 # --------------------------------------------------------------------------- #
-# sleep-stats subcommand
+# <output-dir>/<N>s/ -- root for data/, events_<channel>*.csv and
+# sleep_stats_<channel>*.csv, N = --hypno-epoch-sec
 # --------------------------------------------------------------------------- #
-def test_parse_shard_indices_range():
-    assert pp._parse_shard_indices("0-9") == list(range(10))
+def test_epoch_root_names_directory_by_hypno_epoch_sec():
+    out_dir = Path("/tmp/out")
+    assert pp._epoch_root(out_dir, 3.0) == out_dir / "3s"
 
 
-def test_parse_shard_indices_comma_list():
-    assert pp._parse_shard_indices("0,3,7") == [0, 3, 7]
+def test_epoch_root_non_integer_epoch_sec():
+    out_dir = Path("/tmp/out")
+    assert pp._epoch_root(out_dir, 2.5) == out_dir / "2.5s"
 
 
-def test_parse_shard_indices_single():
-    assert pp._parse_shard_indices("5") == [5]
+# --------------------------------------------------------------------------- #
+# events_<channel>.csv (preprocess subcommand)
+# --------------------------------------------------------------------------- #
+def test_event_fieldnames_two_stages():
+    assert pp._event_fieldnames(["N2", "N3"]) == [
+        "id", "N2_Spindle", "N2_SW", "N3_Spindle", "N3_SW",
+    ]
 
 
-def test_select_shard_subjects_default_matches_plain_limit():
-    subjects = [str(i) for i in range(10)]
-    assert pp._select_shard_subjects(
-        subjects, num_shards=1, shard_indices=[0], per_shard_limit=3,
-    ) == subjects[:3]
+def test_event_fieldnames_never_includes_a_channel_name():
+    # Channel now lives in the events file's name, not its columns.
+    assert pp._event_fieldnames(["N2"]) == ["id", "N2_Spindle", "N2_SW"]
 
 
-def test_select_shard_subjects_matches_preprocessing_array_selection():
-    # subjects[i::num_shards][:per_shard_limit] unioned across shard_indices --
-    # must equal exactly what a `preprocess` job array with the same
-    # --num-shards/--limit would process across those --shard-index values.
-    subjects = [str(i) for i in range(30)]
-    got = pp._select_shard_subjects(
-        subjects, num_shards=10, shard_indices=[0, 1, 2], per_shard_limit=2,
-    )
-    expected = []
-    for shard in (0, 1, 2):
-        expected.extend(subjects[shard::10][:2])
-    assert got == expected
-    assert got == ["0", "10", "1", "11", "2", "12"]
+def test_event_row_reflects_detected_event_counts():
+    channel_events = {"N2": {"spindle": 3, "sw": 0}, "N3": {"spindle": 0, "sw": 1}}
+    row = pp._event_row("SUBJ001", channel_events, stages=["N2", "N3"])
+    assert row == {
+        "id": "SUBJ001",
+        "N2_Spindle": 3, "N2_SW": 0,
+        "N3_Spindle": 0, "N3_SW": 1,
+    }
 
 
-def test_select_shard_subjects_no_limit_takes_whole_shard():
-    subjects = [str(i) for i in range(6)]
-    got = pp._select_shard_subjects(
-        subjects, num_shards=2, shard_indices=[0], per_shard_limit=None,
-    )
-    assert got == ["0", "2", "4"]
+def test_event_row_missing_channel_is_none_not_zero():
+    # The channel raised outright for this subject in preprocess_subject --
+    # absent from `events`, so its columns must be None (blank in the CSV),
+    # never a guessed 0.
+    row = pp._event_row("SUBJ001", None, stages=["N2"])
+    assert row == {"id": "SUBJ001", "N2_Spindle": None, "N2_SW": None}
+
+
+def test_event_row_missing_stage_is_none_not_zero():
+    channel_events = {"N2": {"spindle": 2, "sw": 1}}  # N3 never populated
+    row = pp._event_row("SUBJ001", channel_events, stages=["N2", "N3"])
+    assert row["N3_Spindle"] is None
+    assert row["N3_SW"] is None
+
+
+def test_event_row_zero_events_is_not_treated_as_missing():
+    # A channel that ran fine but detected zero spindles/slow waves must
+    # still report 0, not None -- only an absent channel/stage is None.
+    channel_events = {"N2": {"spindle": 0, "sw": 0}}
+    row = pp._event_row("SUBJ001", channel_events, stages=["N2"])
+    assert row == {"id": "SUBJ001", "N2_Spindle": 0, "N2_SW": 0}
+
+
+def test_events_path_single_subject_has_no_shard_suffix():
+    out_dir = Path("/tmp/out")
+    assert pp._events_path(out_dir, "C3", shard_index=None) == out_dir / "events_C3.csv"
+
+
+def test_events_path_sharded_run_includes_shard_index():
+    out_dir = Path("/tmp/out")
+    assert pp._events_path(out_dir, "C3", shard_index=7) == out_dir / "events_C3_shard7.csv"
+
+
+# --------------------------------------------------------------------------- #
+# sleep_stats_<channel>.csv (written by preprocessing itself, from the
+# hypnogram preprocess_channel already loaded)
+# --------------------------------------------------------------------------- #
+def test_sleep_stats_fieldnames_is_id_then_every_yasa_key():
+    assert pp._sleep_stats_fieldnames() == ["id", *pp.SLEEP_STATS_KEYS]
+
+
+def test_sleep_stats_row_reflects_computed_stats():
+    stats = {key: float(i) for i, key in enumerate(pp.SLEEP_STATS_KEYS)}
+    row = pp._sleep_stats_row("SUBJ001", stats)
+    assert row["id"] == "SUBJ001"
+    for i, key in enumerate(pp.SLEEP_STATS_KEYS):
+        assert row[key] == float(i)
+
+
+def test_sleep_stats_row_missing_channel_is_none_not_zero():
+    # The channel raised outright for this subject in preprocess_subject --
+    # absent from `sleep_stats`, so its columns must be None (blank in the
+    # CSV), never a guessed 0.
+    row = pp._sleep_stats_row("SUBJ001", None)
+    assert row["id"] == "SUBJ001"
+    for key in pp.SLEEP_STATS_KEYS:
+        assert row[key] is None
+
+
+def test_sleep_stats_path_single_subject_has_no_shard_suffix():
+    out_dir = Path("/tmp/out")
+    assert pp._sleep_stats_path(out_dir, "C3", shard_index=None) == out_dir / "sleep_stats_C3.csv"
+
+
+def test_sleep_stats_path_sharded_run_includes_shard_index():
+    out_dir = Path("/tmp/out")
+    assert pp._sleep_stats_path(out_dir, "C3", shard_index=7) == out_dir / "sleep_stats_C3_shard7.csv"

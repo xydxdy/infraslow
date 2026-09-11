@@ -11,8 +11,9 @@
 # Runs src/scripts/preprocessing.py over the whole valid cohort (every subject
 # with both an EDF and a U-Sleep hypnodensity folder), channel C3 only, saving
 # per-subject envelope/temporal_ISFS/bouts/ISFS-spectra/usleep trees to
-# ${OUTPUT_ROOT}/{subject_id}/C3/ (see preprocessing.py's module docstring for
-# the exact layout). The native 1-s U-Sleep hypnodensity is reduced to
+# ${OUTPUT_ROOT}/${HYPNO_EPOCH_SEC}s/data/{subject_id}/C3/ (see
+# preprocessing.py's module docstring for the exact layout). The native 1-s
+# U-Sleep hypnodensity is reduced to
 # ${HYPNO_EPOCH_SEC}-s epochs (preprocessing.py's own default: 3) before
 # bout-finding/event detection -- see --hypno-epoch-sec below.
 #
@@ -35,7 +36,8 @@
 #
 # Each shard writes its own progress_shard{N}.log under $OUTPUT_ROOT/logs (see
 # preprocessing.py's main()) -- shards never share a log file. Per-subject
-# output trees go under $OUTPUT_ROOT/data.
+# output trees, and the events_*/sleep_stats_* CSVs, go under
+# $OUTPUT_ROOT/${HYPNO_EPOCH_SEC}s/ (default epoch width: 3s).
 #
 # Override at submit time, e.g.:
 #   sbatch --array=0-999 --export=ALL,CHANNELS=C3,OUTPUT_ROOT=/scratch/users/chaisaen/processed_data \
@@ -43,6 +45,12 @@
 #   sbatch --array=0-9 --export=ALL,LIMIT=2 run_preprocessing.sbatch   # quick test: 2 subjects/shard
 #   sbatch --array=0-9 --export=ALL,NUM_SHARDS=1000,LIMIT=50,HYPNO_EPOCH_SEC=3,OUTPUT_ROOT=/scratch/users/chaisaen/usleep_dryrun \
 #       run_preprocessing.sbatch   # dry run: ~500 subjects (10 tasks x 50/task), 3-s U-Sleep epoch
+#
+# Submitted plain (no --array) instead, it's a single unsharded task -- NUM_SHARDS/
+# --shard-index are omitted entirely (see NUM_SHARDS/SHARD_INDEX below), so
+# preprocessing.py processes the whole --limit'd cohort itself, sequentially:
+#   sbatch --export=ALL,LIMIT=100,OUTPUT_ROOT=/scratch/users/chaisaen/usleep_dryrun_100 \
+#       run_preprocessing.sbatch   # dry run: 100 subjects, one task, no sharding
 
 set -euo pipefail
 
@@ -50,6 +58,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/users/chaisaen/processed_data}"
 CHANNELS="${CHANNELS:-C3}"
 LIMIT="${LIMIT:-}"
 HYPNO_EPOCH_SEC="${HYPNO_EPOCH_SEC:-}"
+# Unset when submitted without --array (a single-task, unsharded run) --
+# NUM_SHARDS/--shard-index are then omitted below entirely, so
+# preprocessing.py's own resolve_shard() defaults to num_shards=1,
+# shard_index=0 (the whole -- --limit'd -- cohort, no sharding).
+NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-}}"
+SHARD_INDEX="${SLURM_ARRAY_TASK_ID:-}"
 
 mkdir -p /scratch/users/chaisaen/logs
 mkdir -p "${OUTPUT_ROOT}"
@@ -66,10 +80,10 @@ export NUMEXPR_NUM_THREADS=1
 cd /home/users/chaisaen/infraslow/src/scripts
 export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
-python3 preprocessing.py preprocess \
+python3 preprocessing.py \
     --channels ${CHANNELS} \
-    --num-shards "${NUM_SHARDS:-$SLURM_ARRAY_TASK_COUNT}" \
-    --shard-index "${SLURM_ARRAY_TASK_ID}" \
+    ${NUM_SHARDS:+--num-shards "${NUM_SHARDS}"} \
+    ${SHARD_INDEX:+--shard-index "${SHARD_INDEX}"} \
     --output-dir "${OUTPUT_ROOT}" \
     ${LIMIT:+--limit "${LIMIT}"} \
     ${HYPNO_EPOCH_SEC:+--hypno-epoch-sec "${HYPNO_EPOCH_SEC}"}
