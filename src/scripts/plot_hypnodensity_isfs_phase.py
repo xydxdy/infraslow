@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Group-level (subject-balanced) U-Sleep stage probability across continuous ISFS
-phase, per state (N2, N3), plus each state's event phase-bin distribution.
+phase, per --states group (N2, N3, or a merged "N2+N3" -- see _parse_state_groups),
+plus each group's event phase-bin distribution.
 
 Converted from ``demo_hypnodensity_isfs_phase.ipynb`` -- same computation (per-subject
 loader, Section 4.1's event phase-bin rates, Section 4.2's continuous phase-locked
@@ -12,8 +13,11 @@ only ever computed for a subject/state Section 4.1 already deemed usable -- the 
 "never do 4.2's extra work for a subject 4.1 already excluded" rule the notebook
 documents).
 
-Candidate subjects come from ``pio.discover_subjects(--data-dir)`` (sorted), matching
-the notebook's ``DATA_DIR`` scan order. Unlike the notebook -- which stops scanning as
+Candidate subjects come from ``pio.discover_subjects()`` (sorted) run against
+``<preprocess-dir>/<hypno-epoch-sec>s/data`` (preprocessing.py's own ``_epoch_root``
+layout -- see :func:`_resolve_data_dir`; pass ``--data-dir`` to point directly at a
+``data/`` folder instead), matching the notebook's ``DATA_DIR`` scan order. Unlike the
+notebook -- which stops scanning as
 soon as ``N_SUBJECTS`` are included -- this script submits candidates to the worker
 pool in fixed-size chunks (``--workers * 4`` subjects at a time) and stops once
 ``--n-subjects`` are included (default 100, matching the notebook's ``N_SUBJECTS``)
@@ -21,10 +25,12 @@ or the candidate list (optionally capped by ``--limit``) is exhausted. This keep
 notebook's "don't scan more than needed" behavior while still using every worker
 within each chunk.
 
-A subject/state is included in the group figure only if it has both a usable event
+A subject/group is included in the group figure only if it has both a usable event
 (spindle/slow-wave) phase-bin distribution (Section 4.1: >= 1 in-cycle event) and
 complete ``--n-phase-points``-point continuous phase coverage (Section 4.2) -- see
-each state's printed usable/excluded counts.
+each group's printed usable/excluded counts. A multi-stage group (e.g. "N2+N3")
+pools its component stages' bouts/events first, then applies these same checks to
+the pooled result, so it is judged as one merged group throughout, not two.
 
 Every subject's result (included or excluded) is written to ``cache/<subject_id>.npz``
 as soon as it's computed (atomic temp-file + rename, so a killed job never leaves a
@@ -51,9 +57,10 @@ Saves, under ``--output-dir/--event`` (e.g. ``.../hypnodensity_isfs_phase/spindl
 ``.../hypnodensity_isfs_phase/sw``) -- namespaced by event so a spindle run and a sw run
 against the same ``--output-dir`` can be submitted as concurrent jobs without
 clobbering each other's output:
-    hypnodensity_isfs_phase_{state}.pdf -- Section 4.3's figure, one file per state (N2, N3
-                                            are always separate files, never a shared PDF)
-    hypnodensity_isfs_phase_{state}.png -- same figure, PNG
+    hypnodensity_isfs_phase_{state}.png -- Section 4.3's figure, one file per --states group
+                                            ({state} is that group's label, e.g. "N2" or a
+                                            merged "N2+N3" -- always separate files, never a
+                                            shared image)
     exclusions.csv          -- every excluded subject id + categorized reason
     group_stats/{state}.npz -- group_mean, group_sem, phase_points, phase_bin_rates
                                 (subject x 8), bin_centers, n_complete
@@ -68,9 +75,9 @@ clobbering each other's output:
                                 per_subject_curve_correlation / phase_curve_correlation_summary)
     usable_subjects_{state}.csv -- subject_id of every subject contributing to that
                                 state's figure/stat_summary (i.e. common_ids)
-    {event}_stage_phase_corr.png/.pdf -- diverging bar chart of stat_summary_{state}'s
+    {event}_stage_phase_corr.png -- diverging bar chart of stat_summary_{state}'s
                                 mean_r per stage, one panel per state
-    isfs_spectrum_{state}.pdf/.png -- group-level (subject-balanced) baseline-corrected
+    isfs_spectrum_{state}.png -- group-level (subject-balanced) baseline-corrected
                                 ISFS spectrum + bi-Gaussian fit, one file per state --
                                 the group-level analog of demo_infraslow_yasa_average.
                                 ipynb's Fig C-i right panel (see build_isfs_spectrum_figure)
@@ -79,7 +86,7 @@ clobbering each other's output:
                                 real_peak_freq_hz, etc. -- see subject_isfs_spectrum_features/
                                 infraslow.pipeline.spectrum.compute_subject_spectrum_features),
                                 one row per subject usable for that state's spectrum
-    isfs_peak_distribution_{state}.pdf/.png -- histogram of each subject's own real/
+    isfs_peak_distribution_{state}.png -- histogram of each subject's own real/
                                 empirical ISFS peak frequency (subject-balanced: one
                                 value per subject, from that subject's own bout-averaged
                                 spectrum -- see build_peak_distribution_figure)
@@ -146,14 +153,16 @@ ORANGE, LORANGE = "#d2691e", "#f2c14e"
 CORR_POS, CORR_NEG, CORR_NEUTRAL = "#2a78d6", "#e34948", "#9a9a95"
 
 # "spindle"/"sw" artifact-pathway switch (band + bouts key + bouts loader + summary
-# loader + peak column) -- this script's own scan.
+# loader + peak column) -- this script's own scan. events_col is preprocessing.py's
+# events_<channel>.csv column suffix (<stage>_Spindle / <stage>_SW) for the matching
+# event type -- see _filter_subjects_with_events.
 _EVENT_SPECS = {
     "spindle": dict(band="sigma", bouts_key="spindle", event_label="spindles",
                      load_bouts=pio.load_stage_bouts, load_summary=pio.load_spindle_summary,
-                     peak_col="Peak"),
+                     peak_col="Peak", events_col="Spindle"),
     "sw": dict(band="delta", bouts_key="sw", event_label="slow waves",
                load_bouts=pio.load_stage_sw_bouts, load_summary=pio.load_sw_summary,
-               peak_col="NegPeak"),
+               peak_col="NegPeak", events_col="SW"),
 }
 
 
@@ -165,19 +174,118 @@ def _env_str(name: str, default: str) -> str:
     return default if val is None else val
 
 
+def _resolve_data_dir(
+    preprocess_dir: Path, data_dir: Optional[Path], hypno_epoch_sec: float,
+) -> Path:
+    """``data_dir`` if explicitly given (a direct override, e.g. a non-standard
+    layout), else ``<preprocess_dir>/<hypno_epoch_sec>s/data`` -- matching
+    ``preprocessing.py``'s own ``_epoch_root``-nested layout (data/,
+    events_<channel>*.csv and sleep_stats_<channel>*.csv all live under
+    ``<output-dir>/<N>s/``), so this script and preprocessing.py can never
+    disagree about where a given epoch width's ``data/`` tree lives."""
+    if data_dir is not None:
+        return data_dir
+    return preprocess_dir / pio.epoch_dirname(hypno_epoch_sec) / "data"
+
+
+def _events_csv_path(preprocess_dir: Path, channel: str, hypno_epoch_sec: float) -> Path:
+    """``<preprocess_dir>/<hypno_epoch_sec>s/events_<channel>.csv`` -- matches
+    preprocessing.py's ``_events_path`` naming for its (already merged,
+    unsharded) events CSV."""
+    return preprocess_dir / pio.epoch_dirname(hypno_epoch_sec) / f"events_{channel}.csv"
+
+
+def _filter_subjects_with_events(
+    candidates: Sequence[str], events_df: pd.DataFrame, states: Sequence[str], event: str,
+) -> List[str]:
+    """``candidates``, in the same order, restricted to subjects with a confirmed
+    nonzero preprocessing.py-detected ``event`` count in at least one of ``states``
+    (``events_df``'s ``<stage>_{Spindle,SW}`` columns -- see preprocessing.py's
+    ``_event_row``).
+
+    A subject with zero detected events in every requested stage can never pass
+    Section 4.1's ">= 1 in-cycle event" usable check downstream, so dropping it
+    here changes no result -- only which subjects get submitted to the worker
+    pool, saving the cost of loading/processing ones already known to be excluded.
+    A subject missing from ``events_df`` entirely, or blank (``NaN``) in every
+    relevant column (that channel raised outright during preprocessing), is
+    dropped too -- never treated as a guessed ``0``, but neither is it a
+    confirmed detected event.
+    """
+    col_suffix = _EVENT_SPECS[event]["events_col"]
+    columns = [f"{state}_{col_suffix}" for state in states]
+    by_id = events_df.set_index("id")
+    kept = []
+    for subject_id in candidates:
+        if subject_id not in by_id.index:
+            continue
+        row = by_id.loc[subject_id]
+        if any(pd.notna(row.get(col)) and row.get(col) > 0 for col in columns):
+            kept.append(subject_id)
+    return kept
+
+
+def _parse_state_groups(raw_states: Sequence[str]) -> List[Tuple[str, Tuple[str, ...]]]:
+    """Parse ``--states`` tokens into ``(label, components)`` groups: a bare
+    stage (``"N2"``) is its own singleton group; a ``"+"``-joined token
+    (``"N2+N3"``) pools those stages' bouts/events into one merged group --
+    see ``subject_event_phase_bin_rates``/``subject_isfs_spectrum_features``/
+    ``subject_phase_locked_probs_continuous``, the only functions that treat
+    ``components`` as more than an opaque label. Order is preserved, both
+    across groups and within a group's components, exactly as given.
+
+    Raises:
+        ValueError: a group repeats one of its own components (``"N2+N2"``),
+            or two groups produce the same label (``"N2", "N2"`` or
+            ``"N2+N3", "N3+N2"``) -- either would silently collide on the
+            same output filename/cache key.
+    """
+    groups: List[Tuple[str, Tuple[str, ...]]] = []
+    seen_labels: set = set()
+    for token in raw_states:
+        components = tuple(token.split("+"))
+        if len(set(components)) != len(components):
+            raise ValueError(f"--states group {token!r} has a duplicate component")
+        if token in seen_labels:
+            raise ValueError(f"--states has a duplicate group {token!r}")
+        seen_labels.add(token)
+        groups.append((token, components))
+    return groups
+
+
+def _all_leaf_stages(groups: Sequence[Tuple[str, Tuple[str, ...]]]) -> List[str]:
+    """Every distinct leaf stage referenced by any group, sorted -- the set
+    ``load_subject`` must pool bouts from and ``_filter_subjects_with_events``
+    must check columns for, regardless of how those leaf stages are grouped
+    into figures."""
+    return sorted({stage for _, components in groups for stage in components})
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-dir", type=Path,
+    p.add_argument("--preprocess-dir", type=Path,
                     default=Path(os.path.expandvars(
-                        _env_str("DATA_DIR", "$SCRATCH/processed_data/data"))),
-                    help="preprocessing.py output tree, one subdir per subject (env: DATA_DIR)")
+                        _env_str("PREPROCESS_DIR", "$SCRATCH/infraslow_outputs/preprocessed"))),
+                    help="preprocessing.py's --output-dir root -- this script reads "
+                         "<preprocess-dir>/<hypno-epoch-sec>s/data (env: PREPROCESS_DIR); "
+                         "ignored if --data-dir is given")
+    _data_dir_env = os.environ.get("DATA_DIR")
+    p.add_argument("--data-dir", type=Path,
+                    default=Path(os.path.expandvars(_data_dir_env)) if _data_dir_env else None,
+                    help="Override: point directly at a preprocessing.py data/ folder "
+                         "instead of deriving <preprocess-dir>/<hypno-epoch-sec>s/data "
+                         "from --preprocess-dir/--hypno-epoch-sec (env: DATA_DIR)")
     p.add_argument("--usleep-dir", default=os.path.expandvars(
                         _env_str("USLEEP_DIR", DEFAULT_USLEEP_HYPNODENSITY_DIR)),
                     help="U-Sleep hypnodensity directory (env: USLEEP_DIR)")
     p.add_argument("--channel", default=_env_str("CHANNEL", "C3"), help="EEG channel (env: CHANNEL)")
     p.add_argument("--states", nargs="+", default=["N2", "N3"],
-                    help="Stages to analyze, each treated as its own group/figure, never pooled")
+                    help="Groups to analyze, one figure/analysis per group (see "
+                         "_parse_state_groups). A bare stage (e.g. N2) is its own group; "
+                         "join stages with '+' (e.g. N2+N3) to pool their bouts/events "
+                         "into one merged group instead. Mix both in one run, e.g. "
+                         "--states N2 N3 N2+N3 for three groups.")
     p.add_argument("--event", choices=sorted(_EVENT_SPECS), default="spindle",
                     help="Which event type's phase-bin distribution/band to use "
                          "(sets BAND: spindle -> sigma, sw -> delta)")
@@ -187,9 +295,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hypno-epoch-sec", type=float,
                     default=float(_env_str("HYPNO_EPOCH_SEC", str(DEFAULT_HYPNOGRAM_EPOCH_SEC))),
                     help="Must match whatever --hypno-epoch-sec preprocessing.py was run "
-                         "with -- selects which <stage>/<N>s/ directory to read each "
-                         "subject's bout/event artifacts from (env: HYPNO_EPOCH_SEC). Not "
-                         "the same knob as --usleep-epoch-sec below.")
+                         "with -- selects both --preprocess-dir's <N>s/data root (see "
+                         "--data-dir/_resolve_data_dir) and which <stage>/<N>s/ directory "
+                         "to read each subject's bout/event artifacts from within it "
+                         "(env: HYPNO_EPOCH_SEC). Not the same knob as --usleep-epoch-sec below.")
     p.add_argument("--usleep-epoch-sec", type=float,
                     default=float(_env_str("USLEEP_EPOCH_SEC", str(DEFAULT_USLEEP_EPOCH_SEC))),
                     help="Average the native 1-s U-Sleep hypnodensity into windows this "
@@ -203,7 +312,21 @@ def parse_args() -> argparse.Namespace:
                          "N_SUBJECTS); pass 0/negative to disable and use every candidate")
     p.add_argument("--limit", type=int, default=None,
                     help="Cap the candidate pool to the first N discovered subjects "
-                         "(quick tests); default scans every subject under --data-dir")
+                         "(quick tests); default scans every subject under the resolved "
+                         "data dir (see --preprocess-dir/--data-dir)")
+    p.add_argument("--filter-by-events", action="store_true",
+                    help="Before submitting candidates to the worker pool, drop any with "
+                         "zero detected --event events (in preprocessing.py's "
+                         "events_<channel>.csv, across every requested --states -- see "
+                         "_filter_subjects_with_events) -- a processing-time optimization "
+                         "only: such a subject could never pass Section 4.1's usable-event "
+                         "check anyway. Reads <preprocess-dir>/<hypno-epoch-sec>s/"
+                         "events_<channel>.csv (see --events-csv to override); errors if "
+                         "that file doesn't exist.")
+    p.add_argument("--events-csv", type=Path, default=None,
+                    help="Override: events_<channel>.csv path to use with "
+                         "--filter-by-events, instead of deriving it from "
+                         "--preprocess-dir/--channel/--hypno-epoch-sec")
     p.add_argument("--workers", type=int,
                     default=int(_env_str("WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "1"))),
                     help="Parallel worker processes (env: WORKERS, falls back to "
@@ -211,8 +334,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path,
                     default=Path(os.path.expandvars(
                         _env_str("OUTPUT_DIR", "$SCRATCH/outputs/hypnodensity_isfs_phase"))),
-                    help="Where to save the PDF, exclusions.csv, group_stats/, and progress.log "
-                         "(env: OUTPUT_DIR)")
+                    help="Where to save the PNGs, exclusions.csv, group_stats/, and "
+                         "progress.log (env: OUTPUT_DIR)")
     return p.parse_args()
 
 
@@ -273,17 +396,35 @@ def load_subject(data_dir: Path, usleep_dir: str, subject_id: str, channel: str,
     return dict(t_hyp=t_hyp, probs=probs, phase=phase)
 
 
-def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str, state: str, *,
+def _pooled_event_bouts(
+    subject_dir: Path, channel: str, components: Sequence[str], spec: dict,
+    hypno_epoch_sec: float,
+) -> np.ndarray:
+    """``spec["bouts_key"]``'s bouts (n, 2) from every stage in ``components``,
+    concatenated -- a single-element ``components`` is bit-identical to
+    loading that one stage directly (N2 and N3 bouts are time-disjoint by
+    construction, so concatenating never needs deduplication)."""
+    parts = [
+        spec["load_bouts"](subject_dir, channel, stage, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
+        for stage in components
+    ]
+    parts = [p for p in parts if p.shape[0]]
+    return np.concatenate(parts, axis=0) if parts else np.empty((0, 2))
+
+
+def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
+                                   components: Sequence[str], *,
                                    event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
                                    hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC):
-    """This subject/state's `phase_bin_rates` (% of `event`s landing inside a valid
-    ISFS cycle in each of the 8 discrete phase bins -- "Not ISFS" events are
-    excluded from the denominator, see `denominator="in_cycle"` in
-    `isfs_event_phase_distribution`), or `None` if there are no usable
-    `event`-containing bouts."""
+    """This subject/group's (``components`` pooled) `phase_bin_rates` (% of
+    `event`s landing inside a valid ISFS cycle in each of the 8 discrete phase
+    bins -- "Not ISFS" events are excluded from the denominator, see
+    `denominator="in_cycle"` in `isfs_event_phase_distribution`), or `None` if
+    there are no usable `event`-containing bouts across every stage in
+    ``components``."""
     spec = _EVENT_SPECS[event]
     subject_dir = Path(data_dir) / subject_id
-    bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
+    bouts = _pooled_event_bouts(subject_dir, channel, components, spec, hypno_epoch_sec)
     if bouts.shape[0]:
         durations = bouts[:, 1] - bouts[:, 0]
         bouts = bouts[durations >= min_bout_sec]
@@ -291,7 +432,11 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
         return None
 
     t_env, filtered = pio.load_temporal_isfs(subject_dir, channel, spec["band"])
-    event_summary = spec["load_summary"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)
+    summaries = [
+        spec["load_summary"](subject_dir, channel, stage, hypno_epoch_sec=hypno_epoch_sec)
+        for stage in components
+    ]
+    event_summary = pd.concat(summaries, ignore_index=True)
     peak_col = spec["peak_col"]
     event_times = event_summary[peak_col].to_numpy() if peak_col in event_summary.columns else np.empty(0)
 
@@ -302,15 +447,18 @@ def subject_event_phase_bin_rates(data_dir: Path, subject_id: str, channel: str,
     return pph.compute_subject_phase_features(bouts_data)
 
 
-def subject_isfs_spectrum_features(data_dir: Path, subject_id: str, channel: str, state: str, *,
+def subject_isfs_spectrum_features(data_dir: Path, subject_id: str, channel: str,
+                                    components: Sequence[str], *,
                                     event: str, min_bout_sec: float = DEFAULT_MIN_BOUT_SEC,
                                     hypno_epoch_sec: float = DEFAULT_HYPNOGRAM_EPOCH_SEC) -> Optional[dict]:
-    """This subject/state's ISFS spectral fit -- the bi-Gaussian ``fit_isfs``/relative-
-    power pathway ``infraslow.pipeline.spectrum``/``pipeline.py`` already use (matches
-    ``demo_infraslow_yasa_average.ipynb``'s Fig C-i right panel in spirit, but reuses this
-    project's standard bi-Gaussian fit instead of that notebook's own simplified
-    symmetric-Gaussian one). Returns ``None`` if there are no usable `event`-containing
-    bouts, mirroring ``subject_event_phase_bin_rates``.
+    """This subject/group's (``components`` pooled) ISFS spectral fit -- the
+    bi-Gaussian ``fit_isfs``/relative-power pathway ``infraslow.pipeline.
+    spectrum``/``pipeline.py`` already use (matches ``demo_infraslow_yasa_
+    average.ipynb``'s Fig C-i right panel in spirit, but reuses this project's
+    standard bi-Gaussian fit instead of that notebook's own simplified
+    symmetric-Gaussian one). Returns ``None`` if there are no usable `event`-
+    containing bouts across every stage in ``components``, mirroring
+    ``subject_event_phase_bin_rates``.
 
     Returns a dict with keys `freqs`, `rel`, `corrected` (this subject's own mean
     relative-power / baseline-corrected spectrum across its `event`-containing bouts),
@@ -320,15 +468,33 @@ def subject_isfs_spectrum_features(data_dir: Path, subject_id: str, channel: str
     `infraslow.pipeline.spectrum.compute_bout_peak_freqs`)."""
     spec = _EVENT_SPECS[event]
     subject_dir = Path(data_dir) / subject_id
-    bouts = spec["load_bouts"](subject_dir, channel, state, hypno_epoch_sec=hypno_epoch_sec)[spec["bouts_key"]]
+    bouts = _pooled_event_bouts(subject_dir, channel, components, spec, hypno_epoch_sec)
     if bouts.shape[0]:
         durations = bouts[:, 1] - bouts[:, 0]
         bouts = bouts[durations >= min_bout_sec]
     if bouts.shape[0] == 0:
         return None
 
-    isfs = pio.load_stage_isfs_spectra(subject_dir, channel, state, spec["band"],
-                                        hypno_epoch_sec=hypno_epoch_sec)
+    isfs_parts = [
+        pio.load_stage_isfs_spectra(subject_dir, channel, stage, spec["band"],
+                                     hypno_epoch_sec=hypno_epoch_sec)
+        for stage in components
+    ]
+    # A stage with zero bouts at all (not just zero event-containing ones) saves an
+    # empty (0, 0)-shaped psds/freqs instead of the real (0, n_freqs) grid (see
+    # preprocessing.py's compute_bout_spectra: "All empty if bouts is empty") -- drop
+    # those parts before concatenating, using freqs from any part that actually has
+    # bouts (freqs is otherwise the same shared grid for every stage, see
+    # preprocessing.py's module docstring, so any one non-empty part's freqs is as
+    # good as another's).
+    isfs_parts = [p for p in isfs_parts if p["psds"].shape[0] > 0]
+    if not isfs_parts:
+        return None
+    isfs = dict(
+        freqs=isfs_parts[0]["freqs"],
+        psds=np.concatenate([p["psds"] for p in isfs_parts], axis=0),
+        bout_start=np.concatenate([p["bout_start"] for p in isfs_parts], axis=0),
+    )
     selected = psp.select_event_bouts(bouts, isfs)
     if selected["psds"].shape[0] == 0:
         return None
@@ -341,12 +507,15 @@ def subject_isfs_spectrum_features(data_dir: Path, subject_id: str, channel: str
                 feats=feats, bout_peak_freqs=bout_peak_freqs)
 
 
-def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: int) -> np.ndarray:
-    """This subject's own mean hypnodensity probability vector across `n_points`
-    equal-width bins spanning the continuous ISFS phase `(-pi, pi]` -- (n_points,
-    n_stages), NaN row for any bin with zero in-cycle samples."""
+def subject_phase_locked_probs_continuous(
+    data: dict, *, components: Sequence[str], n_points: int,
+) -> np.ndarray:
+    """This subject's own mean hypnodensity probability vector, pooled across
+    every stage in ``components``, across `n_points` equal-width bins spanning
+    the continuous ISFS phase `(-pi, pi]` -- (n_points, n_stages), NaN row for
+    any bin with zero in-cycle samples."""
     phase = data["phase"]
-    phase = phase[phase["state"] == state]
+    phase = phase[phase["state"].isin(components)]
     in_cycle = phase["phase_continuous"].notna()
     t_in = phase.loc[in_cycle, "t"].to_numpy()
     phase_in = phase.loc[in_cycle, "phase_continuous"].to_numpy()
@@ -364,23 +533,28 @@ def subject_phase_locked_probs_continuous(data: dict, *, state: str, n_points: i
 
 
 def _process_subject(
-    task: Tuple[str, Path, str, str, Tuple[str, ...], str, float, int, float, float],
+    task: Tuple[str, Path, str, str, Tuple[Tuple[str, Tuple[str, ...]], ...], str, float, int,
+                float, float],
 ) -> Tuple[str, bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, dict]]:
     """One subject's full Section 3/4.1/4.2 pipeline. Returns
-    ``(subject_id, included, exclusion_reason, rates_by_state, curves_by_state,
-    spectrum_by_state)`` -- ``rates_by_state``/``curves_by_state``/``spectrum_by_state``
-    only ever contain a state key when that state was usable for it (``curves_by_state``
-    is always a subset of ``rates_by_state``, same as the notebook's Section 4.2
-    restricting itself to Section 4.1's usable subject set; ``spectrum_by_state`` is
-    computed alongside ``rates_by_state`` -- it depends only on event-containing bouts,
-    not on Section 4.2's continuous-phase coverage, so it is not restricted to
-    ``curves_by_state``)."""
-    (subject_id, data_dir, usleep_dir, channel, states, event, min_bout_sec, n_phase_points,
+    ``(subject_id, included, exclusion_reason, rates_by_group, curves_by_group,
+    spectrum_by_group)`` -- ``rates_by_group``/``curves_by_group``/``spectrum_by_group``
+    only ever contain a group label key when that group was usable for it
+    (``curves_by_group`` is always a subset of ``rates_by_group``, same as the
+    notebook's Section 4.2 restricting itself to Section 4.1's usable subject
+    set; ``spectrum_by_group`` is computed alongside ``rates_by_group`` -- it
+    depends only on event-containing bouts, not on Section 4.2's continuous-
+    phase coverage, so it is not restricted to ``curves_by_group``). A
+    multi-stage group (see ``_parse_state_groups``) pools its components'
+    bouts/events before computing any of these, so it behaves as one merged
+    stage throughout, not two separate ones."""
+    (subject_id, data_dir, usleep_dir, channel, groups, event, min_bout_sec, n_phase_points,
      usleep_epoch_sec, hypno_epoch_sec) = task
     band = _EVENT_SPECS[event]["band"]
+    all_leaf_stages = _all_leaf_stages(groups)
 
     try:
-        data = load_subject(data_dir, usleep_dir, subject_id, channel, states, band,
+        data = load_subject(data_dir, usleep_dir, subject_id, channel, all_leaf_stages, band,
                              min_bout_sec=min_bout_sec, usleep_epoch_sec=usleep_epoch_sec,
                              hypno_epoch_sec=hypno_epoch_sec)
     except Exception as exc:  # noqa: BLE001 - a missing, empty, or corrupt artifact
@@ -392,9 +566,9 @@ def _process_subject(
     rates: Dict[str, np.ndarray] = {}
     curves: Dict[str, np.ndarray] = {}
     spectrum: Dict[str, dict] = {}
-    for state in states:
+    for label, components in groups:
         try:
-            feats = subject_event_phase_bin_rates(data_dir, subject_id, channel, state,
+            feats = subject_event_phase_bin_rates(data_dir, subject_id, channel, components,
                                                     event=event, min_bout_sec=min_bout_sec,
                                                     hypno_epoch_sec=hypno_epoch_sec)
         except Exception:  # noqa: BLE001 - same as above, scoped to this metric only
@@ -404,23 +578,23 @@ def _process_subject(
         # is the denominator-agnostic "no usable phase-binned events" signal.
         if feats is None or feats["n_in_isfs"] <= 0:
             continue
-        rates[state] = np.asarray(feats["phase_bin_rates"])
+        rates[label] = np.asarray(feats["phase_bin_rates"])
 
         try:
-            spec_data = subject_isfs_spectrum_features(data_dir, subject_id, channel, state,
+            spec_data = subject_isfs_spectrum_features(data_dir, subject_id, channel, components,
                                                          event=event, min_bout_sec=min_bout_sec,
                                                          hypno_epoch_sec=hypno_epoch_sec)
         except Exception:  # noqa: BLE001 - ditto
             spec_data = None
         if spec_data is not None:
-            spectrum[state] = spec_data
+            spectrum[label] = spec_data
 
         try:
-            curve = subject_phase_locked_probs_continuous(data, state=state, n_points=n_phase_points)
+            curve = subject_phase_locked_probs_continuous(data, components=components, n_points=n_phase_points)
         except Exception:  # noqa: BLE001 - ditto
             continue
         if not np.isnan(curve).any():
-            curves[state] = curve
+            curves[label] = curve
 
     return subject_id, True, None, rates, curves, spectrum
 
@@ -743,14 +917,21 @@ def _write_cache(
 
 
 def _read_cache(
-    cache_dir: Path, subject_id: str, states: Sequence[str],
+    cache_dir: Path, subject_id: str, group_labels: Sequence[str],
 ) -> Optional[Tuple[bool, Optional[str], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, dict]]]:
     """This subject's cached `_process_subject` result, or `None` if there is no
     cache entry yet -- or it's unreadable (e.g. left mid-write by a killed job
     before the atomic rename in `_write_cache` took effect), in which case the
     subject is simply reprocessed instead of failing the whole run. Always returns
     a 5-tuple (`spectrum` is `{}` for a cache entry written before spectrum support
-    was added, or by a caller -- e.g. the transition script -- that never passes it)."""
+    was added, or by a caller -- e.g. the transition script -- that never passes it).
+
+    `group_labels` must match the current run's `--states` groups (see
+    `_parse_state_groups`) -- a label not present in this cache entry (e.g. a
+    merged group requested for the first time against an existing cache) is
+    simply absent from the returned dicts, not an error; that group is then
+    reprocessed for this subject the next time it's actually resubmitted (see
+    the module docstring: delete `cache/` to force a full recompute)."""
     path = _cache_path(cache_dir, subject_id)
     if not path.exists():
         return None
@@ -758,10 +939,10 @@ def _read_cache(
         with np.load(path) as npz:
             ok = bool(npz["ok"])
             reason = str(npz["reason"][()]) or None
-            rates = {s: npz[f"rates_{s}"] for s in states if f"rates_{s}" in npz.files}
-            curves = {s: npz[f"curves_{s}"] for s in states if f"curves_{s}" in npz.files}
+            rates = {s: npz[f"rates_{s}"] for s in group_labels if f"rates_{s}" in npz.files}
+            curves = {s: npz[f"curves_{s}"] for s in group_labels if f"curves_{s}" in npz.files}
             spectrum = {}
-            for s in states:
+            for s in group_labels:
                 if f"spec_freqs_{s}" not in npz.files:
                     continue
                 spectrum[s] = dict(
@@ -779,8 +960,9 @@ def _read_cache(
 # --------------------------------------------------------------------------- #
 def main() -> None:
     args = parse_args()
+    data_dir = _resolve_data_dir(args.preprocess_dir, args.data_dir, args.hypno_epoch_sec)
     # Namespaced by event ("spindle"/"sw") so a spindle run and a sw run against the
-    # same --output-dir never share a hypnodensity_isfs_phase.pdf/exclusions.csv/group_stats
+    # same --output-dir never share a hypnodensity_isfs_phase.png/exclusions.csv/group_stats
     # -- lets both be submitted as concurrent jobs.
     args.output_dir = args.output_dir / args.event
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -798,15 +980,26 @@ def main() -> None:
         ],
     )
 
-    states = tuple(args.states)
+    groups = _parse_state_groups(args.states)
+    group_labels = tuple(label for label, _ in groups)
+    all_leaf_stages = _all_leaf_stages(groups)
     n_subjects = args.n_subjects if args.n_subjects and args.n_subjects > 0 else None
     workers = max(1, args.workers)
 
-    candidates = pio.discover_subjects(args.data_dir)
+    candidates = pio.discover_subjects(data_dir)
+    if args.filter_by_events:
+        events_csv_path = args.events_csv or _events_csv_path(
+            args.preprocess_dir, args.channel, args.hypno_epoch_sec,
+        )
+        events_df = pd.read_csv(events_csv_path, dtype={"id": str})
+        n_before = len(candidates)
+        candidates = _filter_subjects_with_events(candidates, events_df, all_leaf_stages, args.event)
+        logger.info(f"--filter-by-events: {n_before} -> {len(candidates)} candidate(s) with "
+                    f">=1 detected {args.event} event in {all_leaf_stages} (from {events_csv_path})")
     if args.limit:
         candidates = candidates[: args.limit]
-    logger.info(f"{len(candidates)} candidate subject(s) under {args.data_dir}; "
-                f"channel={args.channel} states={states} event={args.event!r} "
+    logger.info(f"{len(candidates)} candidate subject(s) under {data_dir}; "
+                f"channel={args.channel} groups={group_labels} event={args.event!r} "
                 f"n_subjects={n_subjects or 'unlimited'} workers={workers} "
                 f"hypno_epoch_sec={args.hypno_epoch_sec} usleep_epoch_sec={args.usleep_epoch_sec}")
 
@@ -827,7 +1020,7 @@ def main() -> None:
             to_process = []
             n_from_cache = 0
             for sid in chunk:
-                cached = _read_cache(cache_dir, sid, states)
+                cached = _read_cache(cache_dir, sid, group_labels)
                 if cached is None:
                     to_process.append(sid)
                     continue
@@ -841,7 +1034,7 @@ def main() -> None:
 
             if to_process:
                 tasks = [
-                    (sid, args.data_dir, args.usleep_dir, args.channel, states, args.event,
+                    (sid, data_dir, args.usleep_dir, args.channel, groups, args.event,
                      args.min_bout_sec, args.n_phase_points, args.usleep_epoch_sec,
                      args.hypno_epoch_sec)
                     for sid in to_process
@@ -885,7 +1078,7 @@ def main() -> None:
     corr_summaries: Dict[str, pd.DataFrame] = {}
     stage_order = list(USLEEP_STAGE_ORDER)
 
-    for state in states:
+    for state in group_labels:
         rates_by_sid = {sid: included[sid][0][state] for sid in subject_ids if state in included[sid][0]}
         curves_by_sid = {sid: included[sid][1][state] for sid in subject_ids if state in included[sid][1]}
         n_rates = len(rates_by_sid)
@@ -940,14 +1133,12 @@ def main() -> None:
             n_complete=len(common_ids), phase_points=phase_points, bin_centers=bin_centers,
             mean_r=mean_r, sem_r=sem_r,
         )
-        # One PDF + one PNG per state -- N2 and N3 are always separate files, never
-        # combined into a shared multi-page PDF.
-        pdf_path = args.output_dir / f"hypnodensity_isfs_phase_{state}.pdf"
+        # One PNG per --states group -- always separate files, never combined
+        # into a shared multi-page figure.
         png_path = args.output_dir / f"hypnodensity_isfs_phase_{state}.png"
-        fig.savefig(pdf_path)
         fig.savefig(png_path)
         plt.close(fig)
-        logger.info(f"saved {state} figure to {pdf_path} and {png_path}")
+        logger.info(f"saved {state} figure to {png_path}")
 
         # Same data, phase axis re-centered on pi/2 -- puts both the ascending
         # (phase=0) and descending (phase=+-pi) zero-crossings in view at once,
@@ -957,12 +1148,10 @@ def main() -> None:
             n_complete=len(common_ids), phase_points=phase_points, bin_centers=bin_centers,
             mean_r=mean_r, sem_r=sem_r, center=np.pi / 2,
         )
-        pdf_path_c = args.output_dir / f"hypnodensity_isfs_phase_{state}_centered_pi2.pdf"
         png_path_c = args.output_dir / f"hypnodensity_isfs_phase_{state}_centered_pi2.png"
-        fig_c.savefig(pdf_path_c)
         fig_c.savefig(png_path_c)
         plt.close(fig_c)
-        logger.info(f"saved {state} pi/2-centered figure to {pdf_path_c} and {png_path_c}")
+        logger.info(f"saved {state} pi/2-centered figure to {png_path_c}")
 
         # --- ISFS spectral peak-frequency analysis (group-level, subject-balanced) ---
         # Its own subject set (spectrum_ids), not common_ids: this only needs a usable
@@ -1007,12 +1196,10 @@ def main() -> None:
                 corrected_mean=corrected_mean, corrected_sem=corrected_sem, fit=group_fit,
                 real_peak_freq=real_peak_freq, n_subjects=len(spectrum_ids),
             )
-            spec_pdf_path = args.output_dir / f"isfs_spectrum_{state}.pdf"
             spec_png_path = args.output_dir / f"isfs_spectrum_{state}.png"
-            spec_fig.savefig(spec_pdf_path)
             spec_fig.savefig(spec_png_path)
             plt.close(spec_fig)
-            logger.info(f"saved {state} ISFS spectrum figure to {spec_pdf_path} and {spec_png_path}")
+            logger.info(f"saved {state} ISFS spectrum figure to {spec_png_path}")
 
             # Every per-subject spectral fit value, one row per subject.
             feat_df = pd.DataFrame(
@@ -1033,13 +1220,10 @@ def main() -> None:
                 subject_peak_freqs=subject_peak_freqs, group_fit_peak=group_fit["mu"],
                 group_real_peak=real_peak_freq,
             )
-            peak_pdf_path = args.output_dir / f"isfs_peak_distribution_{state}.pdf"
             peak_png_path = args.output_dir / f"isfs_peak_distribution_{state}.png"
-            peak_fig.savefig(peak_pdf_path)
             peak_fig.savefig(peak_png_path)
             plt.close(peak_fig)
-            logger.info(f"saved {state} peak-frequency distribution figure to "
-                        f"{peak_pdf_path} and {peak_png_path}")
+            logger.info(f"saved {state} peak-frequency distribution figure to {peak_png_path}")
 
             # Every individual event-containing bout's own empirical peak frequency, one
             # row per subject -- unlike the plot above (one subject-balanced value per
@@ -1063,11 +1247,9 @@ def main() -> None:
         corr_summaries, channel=args.channel, event_label=event_label, stage_order=stage_order,
     )
     corr_png_path = args.output_dir / f"{args.event}_stage_phase_corr.png"
-    corr_pdf_path = args.output_dir / f"{args.event}_stage_phase_corr.pdf"
     corr_fig.savefig(corr_png_path, dpi=150, bbox_inches="tight")
-    corr_fig.savefig(corr_pdf_path, bbox_inches="tight")
     plt.close(corr_fig)
-    logger.info(f"saved stage/phase correlation figure to {corr_png_path} and {corr_pdf_path}")
+    logger.info(f"saved stage/phase correlation figure to {corr_png_path}")
 
     summary_lines = [
         "=== Subject inclusion summary ===",
@@ -1083,13 +1265,13 @@ def main() -> None:
 
     summary_lines.append(f"\nSection 4.1 ({args.event} phase-bin distribution) usable/excluded, out of "
                           f"{len(subject_ids)} included subjects:")
-    for state in states:
+    for state in group_labels:
         n_usable = state_summary[state]["n_rates"]
         summary_lines.append(f"  {state}: {n_usable} usable, {len(subject_ids) - n_usable} excluded")
 
     summary_lines.append("\nSection 4.2 (continuous phase-locked hypnodensity) usable/excluded, out of each "
                           "state's Section 4.1-usable subjects:")
-    for state in states:
+    for state in group_labels:
         n_attempted = state_summary[state]["n_rates"]
         n_usable = state_summary[state]["n_common"]
         summary_lines.append(f"  {state}: {n_usable} usable, {n_attempted - n_usable} excluded "
@@ -1097,7 +1279,7 @@ def main() -> None:
 
     summary_lines.append("\nSubjects contributing to each state's figure (usable for both Section 4.1's "
                           "event distribution and Section 4.2's continuous curve):")
-    for state in states:
+    for state in group_labels:
         summary_lines.append(f"  {state}: {state_summary[state]['n_common']}/{len(subject_ids)}")
 
     summary_text = "\n".join(summary_lines) + "\n"

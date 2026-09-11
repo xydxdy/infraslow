@@ -52,7 +52,14 @@ set -euo pipefail
 mkdir -p /scratch/users/chaisaen/logs
 
 # --- Parameters (edit values here, or override via --export=ALL,VAR=value) ---
-DATA_DIR="${DATA_DIR:-$SCRATCH/usleep_dryrun/data}"
+# PREPROCESS_DIR is preprocessing.py's --output-dir root -- this script reads
+# ${PREPROCESS_DIR}/${HYPNO_EPOCH_SEC}s/data itself (preprocessing.py nests
+# data/, events_<channel>*.csv and sleep_stats_<channel>*.csv under
+# <output-dir>/<N>s/, N = --hypno-epoch-sec -- see preprocessing.py's
+# _epoch_root and this script's _resolve_data_dir). Set DATA_DIR instead to
+# point directly at a data/ folder and skip that derivation.
+PREPROCESS_DIR="${PREPROCESS_DIR:-$SCRATCH/usleep_dryrun}"
+DATA_DIR="${DATA_DIR:-}"
 CHANNEL="${CHANNEL:-C3}"
 STATES="${STATES:-N2 N3}"
 EVENT="${EVENT:-spindle}"
@@ -71,7 +78,8 @@ cd /home/users/chaisaen/infraslow/src/scripts
 export PYTHONPATH=/home/users/chaisaen/infraslow/src
 
 python3 plot_hypnodensity_isfs_phase.py \
-    --data-dir "$DATA_DIR" \
+    --preprocess-dir "$PREPROCESS_DIR" \
+    ${DATA_DIR:+--data-dir "$DATA_DIR"} \
     --channel "$CHANNEL" \
     --states $STATES \
     --event "$EVENT" \
